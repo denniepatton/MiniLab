@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import pathlib
-from typing import Dict
+from typing import Dict, Callable, Optional
 
 import yaml
 
 from MiniLab.llm_backends.base import parse_backend_name
 from MiniLab.llm_backends.openai_backend import OpenAIBackend
 from MiniLab.llm_backends.anthropic_backend import AnthropicBackend
-from MiniLab.tools.filesystem import FileSystemTool
+from MiniLab.tools.filesystem_dual import DualModeFileSystemTool
+from MiniLab.tools.environment import EnvironmentTool
+from MiniLab.tools.citation import CitationTool
+from MiniLab.tools.system_tools import TerminalTool, GitTool
+from MiniLab.tools.web_search import WebSearchTool, PubMedSearchTool, ArxivSearchTool
 from .base import Agent
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "agents.yaml"
-SANDBOX_PATH = ROOT.parent / "Sandbox"
+WORKSPACE_ROOT = ROOT.parent  # MiniLab/ directory
+SANDBOX_PATH = WORKSPACE_ROOT / "Sandbox"
+READDATA_PATH = WORKSPACE_ROOT / "ReadData"
 
 
 def _make_backend(backend_str: str):
@@ -27,10 +33,16 @@ def _make_backend(backend_str: str):
     raise ValueError(f"Unknown backend provider: {provider}")
 
 
-def load_agents() -> Dict[str, Agent]:
+def load_agents(
+    permission_callback: Optional[Callable] = None,
+) -> Dict[str, Agent]:
     """
     Load agent configs from YAML and construct Agent instances.
-    Initializes tools for each agent.
+    Initializes tools for each agent and sets up cross-agent consultation.
+    
+    Args:
+        permission_callback: Optional async function for package install approval.
+                           If None, all package installations will fail.
     """
     with CONFIG_PATH.open() as f:
         cfg = yaml.safe_load(f)
@@ -38,18 +50,50 @@ def load_agents() -> Dict[str, Agent]:
     agents_cfg = cfg.get("agents", {})
     agents: Dict[str, Agent] = {}
 
+    # Create shared filesystem tool (all agents get this for read access)
+    shared_filesystem = DualModeFileSystemTool(
+        workspace_root=WORKSPACE_ROOT,
+        read_only_dirs=["ReadData"],
+        read_write_dirs=["Sandbox"],
+    )
+    
+    # Create shared environment tool with permission callback
+    shared_environment = EnvironmentTool(
+        environment_name="minilab",
+        permission_callback=permission_callback,
+    )
+
     for agent_id, a in agents_cfg.items():
         backend = _make_backend(a["backend"])
         
-        # Initialize tool instances
+        # Initialize tool instances - ALL agents get filesystem access
         tool_instances = {}
         tool_names = a.get("tools", [])
         
-        # Add filesystem tool if requested
-        if "filesystem" in tool_names:
-            tool_instances["filesystem"] = FileSystemTool(sandbox_root=SANDBOX_PATH)
+        # ALL agents get filesystem for reading data and writing to sandbox
+        tool_instances["filesystem"] = shared_filesystem
         
-        # Future: add other tools here (web_search, zotero, etc.)
+        # Add environment tool if requested
+        if "environment" in tool_names:
+            tool_instances["environment"] = shared_environment
+        
+        # Add citation tool if requested
+        if "citation" in tool_names or "citation_index" in tool_names:
+            tool_instances["citation"] = CitationTool()
+        
+        # Add terminal tool if requested
+        if "terminal" in tool_names:
+            tool_instances["terminal"] = TerminalTool()
+        
+        # Add git tool if requested
+        if "git" in tool_names:
+            tool_instances["git"] = GitTool()
+        
+        # Add web search tools if requested
+        if "web_search" in tool_names:
+            tool_instances["web_search"] = WebSearchTool()
+            tool_instances["pubmed_search"] = PubMedSearchTool()
+            tool_instances["arxiv_search"] = ArxivSearchTool()
         
         agents[agent_id] = Agent(
             id=agent_id,
@@ -61,6 +105,10 @@ def load_agents() -> Dict[str, Agent]:
             tools=tool_names,
             tool_instances=tool_instances,
         )
+    
+    # Set up colleague relationships for cross-agent consultation
+    for agent in agents.values():
+        agent.set_colleagues(agents)
 
     return agents
 

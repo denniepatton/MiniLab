@@ -3,7 +3,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
-__all__ = ["Tool", "FileSystemTool"]
+__all__ = [
+    "Tool", 
+    "DualModeFileSystemTool",
+    "FileSystemTool",
+    "EnvironmentTool",
+    "WebSearchTool",
+    "ArxivSearchTool", 
+    "PubMedSearchTool",
+]
 
 
 class Tool(ABC):
@@ -26,3 +34,10 @@ class Tool(ABC):
 
     def __repr__(self) -> str:
         return f"<Tool: {self.name}>"
+
+
+# Import tools for convenience
+from .filesystem_dual import DualModeFileSystemTool
+from .filesystem import FileSystemTool
+from .environment import EnvironmentTool
+from .web_search import WebSearchTool, ArxivSearchTool, PubMedSearchTool

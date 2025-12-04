@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from MiniLab.agents.base import Agent
+from MiniLab.storage.transcript import TranscriptLogger
 
 __all__ = [
     "run_user_team_meeting",
@@ -43,6 +44,7 @@ async def run_pi_coordinated_meeting(
     user_prompt: str,
     project_context: str | None = None,
     max_total_tokens: int = 300000,
+    logger: Optional[TranscriptLogger] = None,
 ) -> dict:
     """
     User speaks to PI, who coordinates with other agents as needed.
@@ -53,7 +55,7 @@ async def run_pi_coordinated_meeting(
     
     Args:
         agents: All available agents
-        pi_agent_id: The PI agent (usually "franklin")
+        pi_agent_id: The PI agent (usually "bohr")
         user_prompt: User's question
         project_context: Optional project context
         max_total_tokens: Maximum tokens across all API calls
@@ -85,34 +87,33 @@ Available team members:
 {chr(10).join(f"- {agent.display_name} ({aid}): {agent.role}" for aid, agent in other_agents.items())}
 
 CRITICAL INSTRUCTIONS:
-1. For ANY file operation (create, save, write, edit files), you MUST delegate to Lee using the DELEGATE format below
-2. For scientific/technical questions, consult appropriate team members using CONSULT format
-3. For simple questions, answer directly
+1. For file operations: delegate to Hinton with filesystem tool
+2. To RUN code/commands: delegate to Hinton/Shannon/Bayes with terminal tool
+3. For consultation: use CONSULT format
+4. For simple answers: respond directly
 
-For file operations, use this EXACT format as your ENTIRE response:
+DELEGATION FORMATS:
 
-DELEGATE: lee
+Write a file:
+DELEGATE: hinton
 tool: filesystem
 action: write
-path: filename.ext
-content: [the full content here]
+path: analysis.py
+content: import pandas as pd
+print("Hello")
 ---END
 
-For team consultation (scientific questions only):
-
-CONSULT:
-- [agent_id]: [specific question for this agent]
+Run a command/script:
+DELEGATE: hinton
+tool: terminal
+command: cd Sandbox/ProjectName && python analysis.py
 ---END
 
-For direct answers, just provide your answer (no special format).
-
-EXAMPLE - User asks "write a hello world script":
-DELEGATE: lee
+List directory:
+DELEGATE: hinton
 tool: filesystem
-action: write
-path: hello_world.py
-content: #!/usr/bin/env python3
-print("Hello, World!")
+action: list
+path: ReadData/Pluvicto
 ---END
 
 Project context: {project_context or "None"}"""
@@ -137,7 +138,7 @@ Project context: {project_context or "None"}"""
             delegate_agent_id = lines[0].strip()
             
             # Parse tool parameters
-            tool_name = "filesystem"
+            tool_name = "filesystem"  # Default
             tool_params = {}
             current_key = None
             content_lines = []
@@ -157,6 +158,12 @@ Project context: {project_context or "None"}"""
                         content_lines = []
                     current_key = "path"
                     tool_params["path"] = line.split(":", 1)[1].strip()
+                elif line.startswith("command:"):
+                    if current_key == "content" and content_lines:
+                        tool_params["content"] = "\n".join(content_lines)
+                        content_lines = []
+                    current_key = "command"
+                    tool_params["command"] = line.split(":", 1)[1].strip()
                 elif line.startswith("content:"):
                     current_key = "content"
                     value = line.split(":", 1)[1].strip() if ":" in line and len(line.split(":", 1)) > 1 else ""
@@ -169,23 +176,154 @@ Project context: {project_context or "None"}"""
             if current_key == "content" and content_lines:
                 tool_params["content"] = "\n".join(content_lines)
             
-            # Get the delegated agent and execute tool
-            delegated_agent = other_agents.get(delegate_agent_id)
-            if delegated_agent and delegated_agent.has_tool(tool_name):
-                show_progress(f"🔧 {pi_agent.display_name} is delegating to {delegated_agent.display_name}...")
-                result = await delegated_agent.use_tool(tool_name, **tool_params)
-                sys.stdout.write("\r" + " " * 60 + "\r")
-                sys.stdout.flush()
-                
-                tool_results.append(result)
-                
-                # Generate response based on result
-                if result.get("success"):
-                    pi_response = f"I delegated the file operation to {delegated_agent.display_name}, and it was successful! The file has been created at `Sandbox/{result.get('path', tool_params.get('path'))}`. You can now use it."
+            # Validate required parameters based on tool
+            validation_failed = False
+            if tool_name == "filesystem" and "action" not in tool_params:
+                print(f"\n⚠️  Missing 'action' parameter for filesystem tool. Skipping delegation.\n")
+                pi_response = "Delegation failed: filesystem tool requires 'action' parameter (list, read, write, create_dir, etc.)"
+                validation_failed = True
+            elif tool_name == "terminal" and "command" not in tool_params:
+                print(f"\n⚠️  Missing 'command' parameter for terminal tool. Skipping delegation.\n")
+                pi_response = "Delegation failed: terminal tool requires 'command' parameter"
+                validation_failed = True
+            
+            # Get the delegated agent and execute tool only if validation passed
+            if not validation_failed:
+                delegated_agent = other_agents.get(delegate_agent_id)
+                if delegated_agent and delegated_agent.has_tool(tool_name):
+                    show_progress(f"🔧 {pi_agent.display_name} is delegating to {delegated_agent.display_name}...")
+                    result = await delegated_agent.use_tool(tool_name, **tool_params)
+                    sys.stdout.write("\r" + " " * 60 + "\r")
+                    sys.stdout.flush()
+                    
+                    tool_results.append(result)
+                    
+                    # Check if tool operation failed
+                    if not result.get("success", False):
+                        error_details = result.get("error", "Unknown error")
+                        
+                        # Determine if this is a RECOVERABLE error or a BLOCKER
+                        recoverable_patterns = [
+                            "Cannot read directory",
+                            "Use action='list'",
+                            "Not a directory",
+                            "Use action='read'",
+                            "Unknown action: create",
+                        ]
+                        
+                        path_param = tool_params.get('path', '')
+                        is_missing_sandbox_dir = (
+                            "Directory not found" in error_details and 
+                            path_param.startswith("Sandbox/")
+                        )
+                        
+                        is_bare_sandbox_access = (
+                            path_param == "Sandbox" or 
+                            "File not found: Sandbox" in error_details
+                        )
+                        
+                        is_outputs_access_attempt = (
+                            "Directory not found" in error_details and
+                            path_param.startswith("Outputs/")
+                        )
+                        
+                        is_recoverable = (
+                            any(pattern in error_details for pattern in recoverable_patterns) or
+                            is_missing_sandbox_dir or
+                            is_outputs_access_attempt or
+                            is_bare_sandbox_access
+                        )
+                        
+                        if is_recoverable:
+                            # AUTO-CORRECT common mistakes
+                            if "Cannot read directory" in error_details and "Use action='list'" in error_details:
+                                print(f"\n🔧 Auto-correcting: changing 'read' to 'list' for directory")
+                                tool_params['action'] = 'list'
+                                result = await delegated_agent.use_tool(tool_name, **tool_params)
+                                tool_results[-1] = result
+                                
+                                if result.get("success"):
+                                    print(f"✓ Auto-correction successful\n")
+                                    pi_response = f"I delegated a task to {delegated_agent.display_name}, and it was successful after auto-correction."
+                                else:
+                                    print(f"⚠️  Auto-correction also failed: {result.get('error')}\n")
+                                    pi_response = f"Tool operation failed even after auto-correction: {result.get('error')}"
+                            elif "Unknown action: create" in error_details:
+                                print(f"\n🔧 Auto-correcting: changing 'create' to 'write' for file creation")
+                                tool_params['action'] = 'write'
+                                result = await delegated_agent.use_tool(tool_name, **tool_params)
+                                tool_results[-1] = result
+                                
+                                if result.get("success"):
+                                    print(f"✓ Auto-correction successful\n")
+                                    pi_response = f"I delegated a task to {delegated_agent.display_name}, and it was successful after auto-correction."
+                                else:
+                                    print(f"⚠️  Auto-correction also failed: {result.get('error')}\n")
+                                    pi_response = f"Tool operation failed even after auto-correction: {result.get('error')}"
+                            elif is_bare_sandbox_access:
+                                pi_response = (
+                                    f"Error: You tried to access 'Sandbox' directly. Use your project directory instead.\n"
+                                    f"All your files should go in the project directory that was created for you.\n"
+                                    f"Do NOT use bare 'Sandbox' - work in your project subdirectory."
+                                )
+                            elif is_outputs_access_attempt:
+                                pi_response = (
+                                    f"Error: Outputs/ directory not accessible. Work in your project directory.\n"
+                                    f"Deliverables will be auto-copied at the end."
+                                )
+                            elif is_missing_sandbox_dir:
+                                pi_response = (
+                                    f"The directory doesn't exist yet, but you can create it:\n\n"
+                                    f"Error: {error_details}\n\n"
+                                    f"Solution: First use action='create_dir' to create the directory, then proceed."
+                                )
+                            else:
+                                pi_response = (
+                                    f"The tool operation failed, but this is correctable:\n\n"
+                                    f"Error: {error_details}\n\n"
+                                    f"Please try again with the correct action."
+                                )
+                        else:
+                            # BLOCKER ERROR: Stop immediately
+                            print(f"\n{'=' * 80}")
+                            print(f"🛑 QUICK-FAIL: Unrecoverable tool error - stopping execution")
+                            print(f"{'=' * 80}")
+                            print(f"Agent: {delegated_agent.display_name}")
+                            print(f"Tool: {tool_name}")
+                            print(f"Error: {error_details}")
+                            print(f"{'=' * 80}\n")
+                            
+                            return {
+                                "pi_response": f"Tool operation failed: {error_details}",
+                                "consultations": {},
+                                "tool_results": tool_results,
+                                "estimated_tokens": estimated_tokens,
+                                "error": error_details,
+                                "failed_quick": True,
+                            }
+                    else:
+                        # Success case
+                        pi_response = f"I delegated a task to {delegated_agent.display_name}, and it was successful!"
                 else:
-                    pi_response = f"I asked {delegated_agent.display_name} to handle the file operation, but there was an issue: {result.get('error', 'Unknown error')}"
-            else:
-                pi_response = f"I tried to delegate to {delegate_agent_id}, but that agent is not available or doesn't have the required tool."
+                    error_msg = f"Delegation target '{delegate_agent_id}' is not available or doesn't have the '{tool_name}' tool."
+                    print(f"\n{'=' * 80}")
+                    print(f"🛑 QUICK-FAIL: Delegation failed")
+                    print(f"{'=' * 80}")
+                    print(f"Attempted to delegate to: {delegate_agent_id}")
+                    print(f"Tool required: {tool_name}")
+                    print(f"Available agents: {list(other_agents.keys())}")
+                    if delegated_agent:
+                        print(f"Agent's tools: {list(delegated_agent.tool_instances.keys())}")
+                    print(f"{'=' * 80}\n")
+                    
+                    return {
+                        "pi_response": error_msg,
+                        "consultations": {},
+                        "tool_results": [],
+                        "estimated_tokens": estimated_tokens,
+                        "error": error_msg,
+                        "failed_quick": True,
+                    }
                 
         except Exception as e:
             print(f"⚠️  Error parsing delegation: {e}")
