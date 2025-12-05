@@ -320,6 +320,7 @@ async def run_single_analysis(
     working_plan = ""
     working_plan_version = 0
     citations = []
+    citations_text = ""  # Accumulates citation text from Gould's lit review
     execution_plan = ""
     execution_plan_type = None  # "exploratory" or "complete"
     
@@ -557,6 +558,9 @@ Please provide Gould with:
 2. Key data elements to consider
 3. Initial directions for literature review
 
+IMPORTANT: My role is BRIEFING only. I do NOT write analysis code or scripts - that is Hinton's job.
+I focus on scientific direction, integration, and project coordination.
+
 Be concise but comprehensive.""", max_tokens=2000)
         tokens_used += TOKEN_PER_CALL
         
@@ -566,11 +570,20 @@ Be concise but comprehensive.""", max_tokens=2000)
 
 {bohr_to_gould}
 
+YOUR ROLE: You are the LIBRARIAN. You use your web_search tool to find literature DIRECTLY.
+DO NOT write Python code, code blocks, or fake tool calls. Simply USE your tools.
+
 Please:
-1. Conduct a comprehensive literature review for this research area
-2. Assemble a preliminary CITATIONS list with at least 5 key sources
+1. Use web_search to find relevant papers on this research topic
+2. Assemble a preliminary CITATIONS list with at least 5 key sources (with DOIs where possible)
 3. Summarize typical hypotheses, analyses, and questions in this domain
 4. Note any methodological considerations from the literature
+
+CRITICAL INSTRUCTIONS:
+- DO NOT output Python code or code blocks
+- DO NOT write fake <function_calls> or tool invocations
+- DIRECTLY use your web_search tool to find papers, then summarize what you find
+- Your output should be TEXT with citations, not code
 
 Format with clear sections for CITATIONS and SUMMARY.""", max_tokens=4000)
         tokens_used += TOKEN_PER_CALL
@@ -880,97 +893,203 @@ Be explicit and detailed for Hinton.""", max_tokens=5000)
     if logger:
         logger.log_stage_transition("Stage 5", "Write-up")
     
-    # 5A: Bohr reviews outputs with vision
-    _print_substage("5A: Bohr Reviews Outputs")
+    # -------------------------------------------------------------------------
+    # CRITICAL: Verify outputs exist before proceeding
+    # -------------------------------------------------------------------------
+    _print_substage("5A: Verify Outputs Exist")
     
     figures_pdf = project_path / f"{project_name}_figures.pdf"
+    outputs_dir = project_path / "outputs"
+    scratch_dir = project_path / "scratch"
     
-    if figures_pdf.exists():
-        print(f"  Bohr viewing {project_name}_figures.pdf...")
-        
-        bohr_review = await bohr.arespond_with_vision(
-            user_message=f"""I'm reviewing the generated figures for {project_name}.
-
-Please examine each panel and describe:
-1. What each panel shows (visualization type, data, key findings)
-2. Whether the formatting is appropriate (labels, legends, colors)
-3. Any issues or improvements needed
-4. How well the panels address the research question
-
-Also assess if this meets Nature-style figure guidelines.""",
-            pdf_path=str(figures_pdf),
-            max_tokens=4000,
-        )
-        tokens_used += TOKEN_PER_CALL * 2  # Vision costs more
-        
-        _show_agent("Bohr", bohr_review, truncate=1500)
-    else:
-        print(f"  ⚠️ {project_name}_figures.pdf not found!")
-        bohr_review = "Figures PDF not yet generated."
+    # Check for figures PDF
+    if not figures_pdf.exists():
+        print(f"  ❌ CRITICAL: {project_name}_figures.pdf does NOT exist!")
+        print("     Cannot proceed to write-up without figures.")
+        # Try to find any PDFs
+        all_pdfs = list(project_path.glob("**/*.pdf"))
+        if all_pdfs:
+            print(f"     Found other PDFs: {[p.name for p in all_pdfs]}")
+        return {
+            "success": False,
+            "error": "Figures PDF not found - cannot proceed to write-up",
+            "project_name": project_name,
+            "tokens_used": tokens_used,
+        }
     
-    # 5B: Gould creates legends and summary
-    _print_substage("5B: Gould Creating Legends and Summary")
+    print(f"  ✓ {project_name}_figures.pdf exists ({figures_pdf.stat().st_size / 1024:.1f} KB)")
+    
+    # Inventory all outputs
+    output_files = list(outputs_dir.glob("*")) if outputs_dir.exists() else []
+    scratch_files = list(scratch_dir.glob("*")) if scratch_dir.exists() else []
+    png_files = [f for f in (output_files + scratch_files) if f.suffix.lower() == '.png']
+    csv_files = [f for f in (output_files + scratch_files) if f.suffix.lower() == '.csv']
+    json_files = [f for f in (output_files + scratch_files) if f.suffix.lower() == '.json']
+    
+    print(f"  Output inventory:")
+    print(f"    - PNG files: {len(png_files)}")
+    print(f"    - CSV files: {len(csv_files)}")
+    print(f"    - JSON files: {len(json_files)}")
+    
+    # Read any results JSON if it exists
+    results_data = ""
+    for jf in json_files:
+        if "result" in jf.name.lower() or "stats" in jf.name.lower():
+            try:
+                with open(jf) as f:
+                    results_data = f.read()[:2000]
+                print(f"    - Found results file: {jf.name}")
+                break
+            except:
+                pass
+    
+    # -------------------------------------------------------------------------
+    # 5B: Bohr reviews figures with vision (only if they exist)
+    # -------------------------------------------------------------------------
+    _print_substage("5B: Bohr Reviews Actual Figures")
+    
+    print(f"  Bohr viewing {project_name}_figures.pdf...")
+    
+    bohr_review = await bohr.arespond_with_vision(
+        user_message=f"""I'm reviewing the generated figures for {project_name}.
+
+CRITICAL: Describe ONLY what you can actually see in the figures. Do not invent or assume content.
+
+For each panel you can see, describe:
+1. Panel letter (a, b, c, etc.) - if visible
+2. What type of visualization it is (scatter, bar, survival curve, heatmap, etc.)
+3. What appears to be plotted (axes labels, data points, trends)
+4. Any visible statistics (p-values, sample sizes, confidence intervals)
+5. Color schemes and legends visible
+
+If you cannot see or determine something, say "not visible" rather than guessing.
+
+Also assess Nature-style compliance:
+- Clean backgrounds
+- Proper font sizes
+- Clear axis labels
+- Professional color palette""",
+        pdf_path=str(figures_pdf),
+        max_tokens=4000,
+    )
+    tokens_used += TOKEN_PER_CALL * 2
+    
+    _show_agent("Bohr", bohr_review, truncate=2000)
+    
+    # Check if Bohr could actually see the figures
+    if "not visible" in bohr_review.lower() or "cannot see" in bohr_review.lower() or "unable to view" in bohr_review.lower():
+        print("  ⚠️ Bohr may have had difficulty viewing the figures")
+    
+    # -------------------------------------------------------------------------
+    # 5C: Gould creates legends based on ACTUAL figure content
+    # -------------------------------------------------------------------------
+    _print_substage("5C: Gould Creating Legends (Based on Actual Figures)")
     
     print("  Gould writing figure legends...")
     
-    legends_response = await gould.arespond(f"""I'm creating Nature-style figure legends for {project_name}.
+    legends_response = await gould.arespond(f"""Create Nature-style figure legends for {project_name}.
 
-BOHR'S FIGURE REVIEW:
-{bohr_review[:2000]}
+BOHR'S DESCRIPTION OF ACTUAL FIGURES:
+{bohr_review}
 
-WORKING PLAN:
-{working_plan[:2000]}
+AVAILABLE RESULTS DATA:
+{results_data if results_data else "No results JSON available - use only what Bohr describes."}
 
-Please create {project_name}_legends.md with:
-- Legend for each panel (a, b, c, d, etc.)
-- Nature-style format with:
-  - Brief description of what's shown
-  - Statistical tests and p-values where applicable
-  - Sample sizes (n=X)
-  - Clear explanation of axes/colors/symbols
-  
-Output the complete legends document in markdown format.""", max_tokens=3000)
+CRITICAL INSTRUCTIONS:
+1. Write legends ONLY for panels that Bohr actually described seeing
+2. Do NOT invent panels, statistics, or data that are not mentioned above
+3. If Bohr couldn't see something clearly, write "Panel [X]: Description pending clearer view"
+4. Every statistic you mention (p-values, sample sizes, effect sizes) MUST come from:
+   - Bohr's figure description, OR
+   - The results data above
+5. If no statistics are visible, do not make them up
+
+FORMAT for each panel:
+**Figure 1[letter].** [One-sentence description of what the panel shows.]
+[Details about the data, statistical test used, p-value if visible, sample size if known.]
+[Description of axes, colors, and symbols if applicable.]
+
+Output ONLY the final legends document in clean markdown format.
+Do not include any "I will now..." or thinking text - just the legends.""", max_tokens=3000)
     tokens_used += TOKEN_PER_CALL
+    
+    # Check for hallucination indicators
+    if any(phrase in legends_response.lower() for phrase in ["i will", "let me", "i'll start", "based on the plan"]):
+        print("  ⚠️ Warning: Response may contain thinking text, not just legends")
     
     # Save legends
     await _agent_writes_file(gould, f"Sandbox/{project_name}/{project_name}_legends.md", legends_response)
-    _show_agent("Gould", legends_response, truncate=1000)
+    _show_agent("Gould", legends_response, truncate=1200)
+    
+    # -------------------------------------------------------------------------
+    # 5D: Gould creates summary based on ACTUAL results
+    # -------------------------------------------------------------------------
+    _print_substage("5D: Gould Creating Summary (Based on Actual Results)")
     
     print("  Gould writing summary document...")
     
-    summary_response = await gould.arespond(f"""I'm creating the summary document for {project_name}.
+    summary_response = await gould.arespond(f"""Create a mini-paper summary for {project_name}.
 
-BOHR'S FIGURE REVIEW:
-{bohr_review[:2000]}
+BOHR'S DESCRIPTION OF ACTUAL FIGURES:
+{bohr_review}
 
-WORKING PLAN:
-{working_plan[:3000]}
+AVAILABLE RESULTS DATA:
+{results_data if results_data else "No results JSON file found."}
 
-CITATIONS from literature review:
-{citations_text[:1500]}
+LITERATURE CITATIONS (from earlier review):
+{citations_text[:1500] if citations_text else "Use web_search to find relevant citations if needed."}
 
-Please create {project_name}_summary.md as a miniaturized Nature-style paper:
+RESEARCH QUESTION:
+{research_question}
+
+CRITICAL INSTRUCTIONS:
+1. Write about ONLY what the figures actually show (per Bohr's description)
+2. Do NOT invent statistics, p-values, hazard ratios, or AUC values
+3. Every claim must have EITHER:
+   - A figure panel reference (e.g., "Figure 1b shows...")
+   - A citation with DOI
+4. If results are unclear, say "The analysis suggests..." not "We found statistically significant..."
+5. Do not include "I will now...", "Let me...", or any thinking text
+
+OUTPUT FORMAT (clean markdown, nothing else):
 
 ## INTRODUCTION
-Two paragraphs: background/current state of field, and rationale/hypothesis
+[Two paragraphs: Background on the field, then rationale and hypothesis for this analysis]
 
-## DISCUSSION  
-Two+ paragraphs (~1 page): explicit references to figure panels, interpretation,
-context for results, concluding synthesis paragraph
+## RESULTS
+[Describe what each figure panel actually shows. Reference specific panels (Fig 1a, 1b, etc.)]
+[Include only statistics that appear in the figures or results data]
+
+## DISCUSSION
+[Interpret the results in context of the literature]
+[Compare to published findings, cite relevant papers with DOIs]
+[Acknowledge limitations]
 
 ## METHODS
-Detailed explanation of all analyses, references to scripts used
+[Describe the analysis pipeline, reference script names from Sandbox/{project_name}/scripts/]
+[Statistical tests used, software versions, data sources]
 
 ## REFERENCES
-Complete bibliography with clickable DOI links
-Every citation must be referenced in the text above
+[Numbered list with DOIs where possible]
+[Every reference must be cited in the text above]
 
-Ensure all claims are supported by data or citations.""", max_tokens=5000)
+Output ONLY the final document. No preamble, no "Here is...", just the markdown.""", max_tokens=6000)
     tokens_used += TOKEN_PER_CALL
+    
+    # Check for hallucination indicators
+    hallucination_phrases = [
+        "hr = 0.", "auc = 0.", "p = 0.00", "p < 0.001",  # Made-up stats
+        "i will", "let me", "i'll create", "here is",  # Thinking text
+        "based on the plan", "as outlined",  # Plan references instead of actual data
+    ]
+    for phrase in hallucination_phrases:
+        if phrase in summary_response.lower():
+            print(f"  ⚠️ Warning: Possible hallucination detected ('{phrase}')")
+            break
     
     # Save summary
     await _agent_writes_file(gould, f"Sandbox/{project_name}/{project_name}_summary.md", summary_response)
-    _show_agent("Gould", summary_response, truncate=1500)
+    _show_agent("Gould", summary_response, truncate=1800)
     
     print(f"\n  ✓ Write-up complete:")
     print(f"    - {project_name}_legends.md")
@@ -985,34 +1104,65 @@ Ensure all claims are supported by data or citations.""", max_tokens=5000)
     
     print("  Farber conducting critical review...")
     
-    # Farber reviews all three outputs
+    # Farber reviews all three outputs with specific focus on hallucination
     farber_review = await farber.arespond_with_vision(
-        user_message=f"""I'm conducting a critical review of all outputs for {project_name}.
+        user_message=f"""Conduct a RIGOROUS critical review of all outputs for {project_name}.
 
-LEGENDS:
-{legends_response[:2000]}
+I need you to check for HALLUCINATION - agents making up data that doesn't exist.
 
-SUMMARY:
-{summary_response[:3000]}
+LEGENDS DOCUMENT:
+{legends_response[:2500]}
 
-Please critically evaluate:
-1. VALIDITY: Are the sources real and properly cited? Are conclusions supported?
-2. ACCURACY: Do figure descriptions match what's shown? Are statistics correct?
-3. METHODS: Are the methods appropriate and well-described?
-4. FORMATTING: Does everything follow Nature-style guidelines?
-5. COHERENCE: Do figures, legends, and summary align?
+SUMMARY DOCUMENT:
+{summary_response[:3500]}
 
-Be thorough and critical. Note any issues that must be fixed.""",
+BOHR'S ACTUAL FIGURE DESCRIPTION:
+{bohr_review[:1500]}
+
+CRITICAL REVIEW CHECKLIST:
+
+1. HALLUCINATION CHECK:
+   - Are there statistics (p-values, HR, AUC) in legends/summary that Bohr didn't see in figures?
+   - Are there panel descriptions for panels that don't exist?
+   - Are there supplementary figures referenced that weren't created?
+   - Mark each suspect claim with "⚠️ POSSIBLE HALLUCINATION"
+
+2. CITATION CHECK:
+   - Does every factual claim have either a figure reference OR a literature citation?
+   - Are the DOIs real and correctly formatted?
+   - Mark uncited claims with "⚠️ UNCITED CLAIM"
+
+3. CONSISTENCY CHECK:
+   - Do the legends match what Bohr described seeing?
+   - Does the summary accurately reflect the figure content?
+   - Are methods descriptions accurate?
+
+4. QUALITY CHECK:
+   - Is the writing professional (no "I will...", "Let me...")?
+   - Is it formatted correctly for Nature style?
+   - Are all sections complete?
+
+BE HARSH. List every issue you find. This is peer review.""",
         pdf_path=str(figures_pdf) if figures_pdf.exists() else None,
-        max_tokens=4000,
+        max_tokens=5000,
     )
     tokens_used += TOKEN_PER_CALL * 2
     
-    _show_agent("Farber", farber_review, truncate=2000)
+    _show_agent("Farber", farber_review, truncate=2500)
+    
+    # Count issues
+    hallucination_count = farber_review.lower().count("hallucination")
+    uncited_count = farber_review.lower().count("uncited")
+    
+    if hallucination_count > 0 or uncited_count > 0:
+        print(f"\n  ⚠️ Issues found:")
+        print(f"    - Possible hallucinations: {hallucination_count}")
+        print(f"    - Uncited claims: {uncited_count}")
     
     # Determine if work is acceptable
     is_acceptable = not any(word in farber_review.lower() 
-                           for word in ['major issue', 'unacceptable', 'must fix', 'critical error', 'reject'])
+                           for word in ['major issue', 'unacceptable', 'must fix', 'critical error', 
+                                       'reject', 'hallucination', 'fabricated'])
     
     if is_acceptable:
         print("\n  ✓ Farber approves the work.\n")
@@ -1055,6 +1205,198 @@ Be thorough and critical. Note any issues that must be fixed.""",
 # EXECUTION HELPER (Stages 3 & 4)
 # =============================================================================
 
+MAX_FIX_ATTEMPTS_PER_SCRIPT = 5  # Max attempts to fix a single script
+
+
+async def _generate_single_script(
+    hinton: Agent,
+    script_spec: str,
+    project_name: str,
+    project_path: Path,
+    is_exploratory: bool,
+    tokens_used: int,
+) -> tuple[str, int]:
+    """
+    Generate a single script with Hinton.
+    
+    Returns: (script_code, tokens_used)
+    """
+    output_dir_name = "scratch" if is_exploratory else "outputs"
+    
+    prompt = f"""Generate ONE complete Python script for the following task:
+
+{script_spec}
+
+REQUIREMENTS:
+1. Read data from ReadData/
+2. Write outputs to Sandbox/{project_name}/{output_dir_name}/
+3. Use micromamba minilab environment (pandas, numpy, matplotlib, seaborn, scipy, sklearn, lifelines)
+4. Include proper error handling and print statements for progress
+5. Set random seed: np.random.seed(42) at the top
+6. Include `if __name__ == "__main__":` block
+7. Print "SCRIPT COMPLETE: [output files created]" at the end
+{"" if is_exploratory else f'''
+8. For figure scripts: Format for Nature style - white backgrounds, no gridlines, 10-12pt fonts
+9. Final figures PDF goes to: Sandbox/{project_name}/{project_name}_figures.pdf'''}
+
+CRITICAL: Write the COMPLETE script. Do not truncate or abbreviate any code.
+Do not use "..." or "# similar code for other cases" - write out ALL code.
+
+Provide ONLY the Python code in a ```python``` block, no explanation."""
+
+    response = await hinton.arespond(prompt, max_tokens=SCRIPT_TOKEN_LIMIT)
+    tokens_used += TOKEN_PER_CALL
+    
+    code = extract_code_from_response(response)
+    return code, tokens_used
+
+
+async def _fix_script(
+    hinton: Agent,
+    script_code: str,
+    error_message: str,
+    script_name: str,
+    attempt: int,
+    tokens_used: int,
+) -> tuple[str, int]:
+    """
+    Have Hinton fix a failing script.
+    
+    Returns: (fixed_code, tokens_used)
+    """
+    prompt = f"""Fix this Python script that failed to run.
+
+SCRIPT: {script_name}
+ATTEMPT: {attempt}/{MAX_FIX_ATTEMPTS_PER_SCRIPT}
+
+ERROR:
+{error_message[:3000]}
+
+CURRENT CODE:
+```python
+{script_code}
+```
+
+REQUIREMENTS:
+1. Fix the specific error shown
+2. Ensure all imports are at the top
+3. Ensure `if __name__ == "__main__":` block exists
+4. Print "SCRIPT COMPLETE: [outputs]" at the end
+5. Write the COMPLETE fixed script - do not truncate or abbreviate
+
+Provide ONLY the fixed Python code in a ```python``` block, no explanation."""
+
+    response = await hinton.arespond(prompt, max_tokens=FIX_TOKEN_LIMIT)
+    tokens_used += TOKEN_PER_CALL
+    
+    code = extract_code_from_response(response)
+    return code, tokens_used
+
+
+async def _run_script_with_retry(
+    hinton: Agent,
+    script_path: Path,
+    workspace_root: Path,
+    tokens_used: int,
+) -> tuple[dict, int]:
+    """
+    Run a script with iterative fixing until it succeeds or max attempts reached.
+    
+    Returns: (result_dict, tokens_used)
+    
+    result_dict has:
+      - success: bool
+      - output: str (if success)
+      - error: str (if failure)
+      - attempts: int
+    """
+    script_name = script_path.name
+    
+    for attempt in range(1, MAX_FIX_ATTEMPTS_PER_SCRIPT + 1):
+        print(f"      Attempt {attempt}/{MAX_FIX_ATTEMPTS_PER_SCRIPT}...")
+        
+        # Read current script code
+        with open(script_path) as f:
+            script_code = f.read()
+        
+        # Check for truncation indicators
+        if "..." in script_code or "# similar" in script_code.lower() or "# etc" in script_code.lower():
+            print(f"        ⚠️ Script appears truncated, requesting complete version...")
+            fixed_code, tokens_used = await _fix_script(
+                hinton, script_code, 
+                "Script is truncated. Please provide the COMPLETE code without abbreviations.",
+                script_name, attempt, tokens_used
+            )
+            if fixed_code and len(fixed_code) > len(script_code):
+                with open(script_path, 'w') as f:
+                    f.write(fixed_code)
+                script_code = fixed_code
+        
+        # Validate syntax first
+        is_valid, syntax_error = validate_python_syntax(script_code)
+        if not is_valid:
+            print(f"        ✗ Syntax error: {syntax_error}")
+            fixed_code, tokens_used = await _fix_script(
+                hinton, script_code, f"Syntax error: {syntax_error}",
+                script_name, attempt, tokens_used
+            )
+            if fixed_code:
+                with open(script_path, 'w') as f:
+                    f.write(fixed_code)
+            continue  # Try running again
+        
+        # Run the script
+        try:
+            result = subprocess.run(
+                ["micromamba", "run", "-n", "minilab", "python", str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=str(workspace_root),
+            )
+            
+            if result.returncode == 0:
+                print(f"        ✓ SUCCESS")
+                return {
+                    "success": True,
+                    "output": result.stdout[-1000:],
+                    "attempts": attempt,
+                }, tokens_used
+            else:
+                error_msg = result.stderr if result.stderr else result.stdout
+                print(f"        ✗ Runtime error")
+                
+                if attempt < MAX_FIX_ATTEMPTS_PER_SCRIPT:
+                    fixed_code, tokens_used = await _fix_script(
+                        hinton, script_code, error_msg,
+                        script_name, attempt, tokens_used
+                    )
+                    if fixed_code:
+                        with open(script_path, 'w') as f:
+                            f.write(fixed_code)
+                else:
+                    return {
+                        "success": False,
+                        "error": error_msg[:2000],
+                        "attempts": attempt,
+                    }, tokens_used
+                    
+        except subprocess.TimeoutExpired:
+            print(f"        ✗ Timeout (5 min)")
+            return {
+                "success": False,
+                "error": "Script timed out after 5 minutes",
+                "attempts": attempt,
+            }, tokens_used
+    
+    # Should not reach here, but just in case
+    return {
+        "success": False,
+        "error": f"Failed after {MAX_FIX_ATTEMPTS_PER_SCRIPT} attempts",
+        "attempts": MAX_FIX_ATTEMPTS_PER_SCRIPT,
+    }, tokens_used
+
+
 async def _execute_stage(
     stage_num: int,
     stage_name: str,
@@ -1070,7 +1412,13 @@ async def _execute_stage(
     """
     Execute analysis scripts (shared logic for Stages 3 and 4).
     
-    Flow: Dayhoff → Hinton → Bayes → Dayhoff (can iterate)
+    CRITICAL APPROACH:
+    - Generate scripts ONE AT A TIME
+    - Each script MUST run successfully before proceeding to the next
+    - Iterate with fixes until success or max attempts
+    - No batch generation that produces truncated code
+    
+    Flow: Dayhoff → Hinton (per-script iterative) → Bayes → Dayhoff
     """
     _print_stage(f"STAGE {stage_num}", stage_name)
     if logger:
@@ -1082,227 +1430,195 @@ async def _execute_stage(
     
     scripts_dir = project_path / "scripts"
     scratch_dir = project_path / "scratch"
+    outputs_dir = project_path / "outputs"
+    workspace_root = Path.cwd()
     
-    max_iterations = 3
-    iteration = 0
-    execution_successful = False
-    results_summary = ""
+    # Step 1: Have Dayhoff break down the execution plan into individual script specs
+    _print_substage("Dayhoff Breaking Down Execution Plan")
     
-    while not execution_successful and iteration < max_iterations:
-        iteration += 1
-        print(f"\n  Execution iteration {iteration}...")
-        
-        # Hinton generates/updates scripts
-        _print_substage(f"Hinton Generating Scripts (iteration {iteration})")
-        
-        existing_scripts = list(scripts_dir.glob("*.py"))
-        existing_context = ""
-        if existing_scripts and iteration > 1:
-            existing_context = f"\nEXISTING SCRIPTS (update these):\n"
-            for s in existing_scripts[:5]:
-                existing_context += f"- {s.name}\n"
-        
-        hinton_prompt = f"""EXECUTION PLAN for {project_name}:
-
-{execution_plan[:6000]}
-
-{existing_context}
-
-Please generate the required Python scripts. For each script:
-1. Save scripts to Sandbox/{project_name}/scripts/
-2. Read data from ReadData/
-3. Write intermediate outputs to Sandbox/{project_name}/{'scratch' if is_exploratory else 'outputs'}/
-4. Use micromamba minilab environment (pandas, numpy, matplotlib, seaborn, scipy, sklearn, lifelines)
-5. Include proper error handling and progress prints
-6. Set random seed: np.random.seed(42)
-{"" if is_exploratory else f'''
-7. The FINAL figures PDF must be saved to: Sandbox/{project_name}/{project_name}_figures.pdf
-8. Use matplotlib.backends.backend_pdf.PdfPages or PIL to combine panels into a single PDF
-9. Format for Nature: clean white backgrounds, no gridlines, 10-12pt fonts, proper axis labels'''}
-
-{"Focus on exploratory analyses only." if is_exploratory else "Generate all scripts including final figure assembly."}
-
-For each script, provide the complete code in ```python``` blocks."""
-        
-        hinton_response = await hinton.arespond(hinton_prompt, max_tokens=SCRIPT_TOKEN_LIMIT)
-        tokens_used += TOKEN_PER_CALL
-        
-        # Extract and save scripts
-        script_blocks = re.findall(r'```python\s*\n(.*?)```', hinton_response, re.DOTALL)
-        script_names = re.findall(r'(?:script|file)[:\s]+[`"\']?(\w+\.py)[`"\']?', hinton_response, re.IGNORECASE)
-        
-        scripts_created = []
-        for i, code in enumerate(script_blocks):
-            name = script_names[i] if i < len(script_names) else f"script_{i+1:02d}.py"
-            script_path = scripts_dir / name
-            
-            # Validate syntax
-            is_valid, error = validate_python_syntax(code)
-            if not is_valid:
-                print(f"    ⚠️ {name} has syntax error: {error}")
-                # Try to fix
-                fix_response = await hinton.arespond(f"""Fix this code that produced an error:
-
-Code:
-```python
-{code}
-```
-
-Error: {error}
-
-Provide only the fixed code in a ```python``` block with no explanation.""", max_tokens=FIX_TOKEN_LIMIT)
-                tokens_used += TOKEN_PER_CALL
-                
-                fixed_code = extract_code_from_response(fix_response)
-                if fixed_code:
-                    is_valid, _ = validate_python_syntax(fixed_code)
-                    if is_valid:
-                        code = fixed_code
-                        print(f"    ✓ {name} fixed")
-            
-            with open(script_path, 'w') as f:
-                f.write(code)
-            scripts_created.append(name)
-            print(f"    Created: {name}")
-        
-        if not scripts_created:
-            print("    ⚠️ No scripts were created!")
-            continue
-        
-        # Run scripts
-        _print_substage("Running Scripts")
-        
-        # Get workspace root for proper path resolution
-        workspace_root = Path.cwd()
-        
-        execution_results = {}
-        for script_name in sorted(scripts_created):
-            script_path = scripts_dir / script_name
-            print(f"    Running {script_name}...")
-            
-            try:
-                # Run from workspace root so ReadData/ and Sandbox/ paths resolve correctly
-                result = subprocess.run(
-                    ["micromamba", "run", "-n", "minilab", "python", str(script_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                    cwd=str(workspace_root),
-                )
-                
-                if result.returncode == 0:
-                    print(f"      ✓ Success")
-                    execution_results[script_name] = {"success": True, "output": result.stdout[-500:]}
-                else:
-                    print(f"      ✗ Failed: {result.stderr[:200]}")
-                    execution_results[script_name] = {"success": False, "error": result.stderr}
-                    
-                    # Try to fix
-                    with open(script_path) as f:
-                        code = f.read()
-                    
-                    fix_response = await hinton.arespond(f"""Fix this code that produced an error:
-
-Code:
-```python
-{code}
-```
-
-Error:
-{result.stderr[:2000]}
-
-Provide only the fixed code in a ```python``` block with no explanation.""", max_tokens=FIX_TOKEN_LIMIT)
-                    tokens_used += TOKEN_PER_CALL
-                    
-                    fixed_code = extract_code_from_response(fix_response)
-                    if fixed_code:
-                        with open(script_path, 'w') as f:
-                            f.write(fixed_code)
-                        
-                        # Retry - run from workspace root
-                        result2 = subprocess.run(
-                            ["micromamba", "run", "-n", "minilab", "python", str(script_path)],
-                            capture_output=True,
-                            text=True,
-                            timeout=300,
-                            cwd=str(workspace_root),
-                        )
-                        
-                        if result2.returncode == 0:
-                            print(f"      ✓ Fixed and succeeded")
-                            execution_results[script_name] = {"success": True, "output": result2.stdout[-500:]}
-                        
-            except subprocess.TimeoutExpired:
-                print(f"      ✗ Timed out")
-                execution_results[script_name] = {"success": False, "error": "Timeout after 5 minutes"}
-        
-        # Count successes
-        successes = sum(1 for r in execution_results.values() if r.get("success"))
-        print(f"\n    Results: {successes}/{len(execution_results)} scripts succeeded")
-        
-        # Bayes code review
-        _print_substage("Bayes Code Review")
-        
-        outputs_dir = scratch_dir if is_exploratory else (project_path / "outputs")
-        output_files = list(outputs_dir.glob("*")) if outputs_dir.exists() else []
-        
-        bayes_review = await bayes.arespond_with_vision(
-            user_message=f"""I'm reviewing the execution results for {project_name}.
-
-EXECUTION RESULTS:
-{str(execution_results)[:2000]}
-
-OUTPUT FILES CREATED:
-{[f.name for f in output_files[:20]]}
+    dayhoff_breakdown = await dayhoff.arespond(f"""Break down this execution plan into individual scripts.
 
 EXECUTION PLAN:
-{execution_plan[:2000]}
+{execution_plan[:5000]}
 
-Please:
-1. Review if the scripts achieved the goals
-2. Check statistical validity of any results
-3. {"Assess if exploration answered the key questions" if is_exploratory else "Verify the figure panels are correct"}
-4. Note any issues or improvements needed
+For each script, provide:
+1. Script name (e.g., 01_data_loading.py, 02_preprocessing.py, etc.)
+2. Purpose (one sentence)
+3. Input files (from ReadData/ or previous script outputs)
+4. Output files (to Sandbox/{project_name}/{'scratch' if is_exploratory else 'outputs'}/)
+5. Key operations (bullet points)
 
-Be thorough but constructive.""",
-            image_paths=[str(f) for f in output_files if f.suffix.lower() in ['.png', '.jpg', '.jpeg']][:5],
-            max_tokens=3000,
+IMPORTANT: Each script should be a COMPLETE, standalone piece that can run independently
+(except for dependencies on outputs from previous scripts).
+
+Format as:
+### SCRIPT: 01_name.py
+Purpose: ...
+Inputs: ...
+Outputs: ...
+Operations:
+- ...
+
+List scripts in execution order.""", max_tokens=4000)
+    tokens_used += TOKEN_PER_CALL
+    
+    _show_agent("Dayhoff", dayhoff_breakdown, truncate=1500)
+    
+    # Parse script specifications
+    script_specs = []
+    spec_pattern = r'###\s*SCRIPT:\s*(\S+\.py)(.*?)(?=###\s*SCRIPT:|$)'
+    matches = re.findall(spec_pattern, dayhoff_breakdown, re.DOTALL | re.IGNORECASE)
+    
+    if not matches:
+        # Fallback: try to find numbered scripts
+        lines = dayhoff_breakdown.split('\n')
+        current_spec = ""
+        current_name = ""
+        for line in lines:
+            if re.match(r'^\d+[\.\)]\s*\w+\.py', line):
+                if current_name and current_spec:
+                    script_specs.append((current_name, current_spec))
+                name_match = re.search(r'(\w+\.py)', line)
+                current_name = name_match.group(1) if name_match else f"script_{len(script_specs)+1:02d}.py"
+                current_spec = line
+            elif current_name:
+                current_spec += "\n" + line
+        if current_name and current_spec:
+            script_specs.append((current_name, current_spec))
+    else:
+        script_specs = [(m[0].strip(), m[1].strip()) for m in matches]
+    
+    if not script_specs:
+        print("    ⚠️ Could not parse script specifications. Using single-script fallback.")
+        script_specs = [("analysis_pipeline.py", execution_plan)]
+    
+    print(f"\n    Identified {len(script_specs)} scripts to generate:")
+    for name, _ in script_specs:
+        print(f"      - {name}")
+    
+    # Step 2: Generate and run each script sequentially with iterative fixing
+    _print_substage("Generating and Running Scripts (Sequentially)")
+    
+    execution_results = {}
+    all_succeeded = True
+    
+    for idx, (script_name, script_spec) in enumerate(script_specs, 1):
+        print(f"\n    [{idx}/{len(script_specs)}] {script_name}")
+        
+        # Generate the script
+        print(f"      Generating...")
+        script_code, tokens_used = await _generate_single_script(
+            hinton, script_spec, project_name, project_path, is_exploratory, tokens_used
         )
-        tokens_used += TOKEN_PER_CALL * 2
         
-        _show_agent("Bayes", bayes_review, truncate=1500)
+        if not script_code:
+            print(f"      ⚠️ Failed to generate script code")
+            execution_results[script_name] = {"success": False, "error": "No code generated"}
+            all_succeeded = False
+            continue
         
-        # Dayhoff assesses results
-        dayhoff_assess = await dayhoff.arespond(f"""Bayes has reviewed the execution:
+        # Save script
+        script_path = scripts_dir / script_name
+        with open(script_path, 'w') as f:
+            f.write(script_code)
+        
+        # Run with retry
+        print(f"      Running with retry loop...")
+        result, tokens_used = await _run_script_with_retry(
+            hinton, script_path, workspace_root, tokens_used
+        )
+        
+        execution_results[script_name] = result
+        
+        if not result["success"]:
+            all_succeeded = False
+            print(f"      ❌ FAILED after {result['attempts']} attempts")
+            # Continue to next script even if this one failed
+            # (some scripts may be independent)
+        else:
+            print(f"      ✓ Succeeded on attempt {result['attempts']}")
+    
+    # Summary
+    successes = sum(1 for r in execution_results.values() if r.get("success"))
+    print(f"\n    Script Results: {successes}/{len(execution_results)} succeeded")
+    
+    # Step 3: Bayes reviews execution results
+    _print_substage("Bayes Code Review")
+    
+    output_dir = scratch_dir if is_exploratory else outputs_dir
+    output_files = list(output_dir.glob("*")) if output_dir.exists() else []
+    
+    # Check if figures PDF exists (for complete execution)
+    figures_pdf = project_path / f"{project_name}_figures.pdf"
+    figures_exist = figures_pdf.exists()
+    
+    bayes_review = await bayes.arespond_with_vision(
+        user_message=f"""I'm reviewing the execution results for {project_name}.
+
+EXECUTION SUMMARY:
+- Scripts run: {len(execution_results)}
+- Succeeded: {successes}
+- Failed: {len(execution_results) - successes}
+
+DETAILED RESULTS:
+{str({k: {'success': v['success'], 'attempts': v.get('attempts', 1)} for k, v in execution_results.items()})[:1500]}
+
+OUTPUT FILES CREATED ({len(output_files)}):
+{[f.name for f in output_files[:20]]}
+
+{"FIGURES PDF EXISTS: " + str(figures_exist) if not is_exploratory else ""}
+
+Please review:
+1. Did the scripts achieve the execution plan goals?
+2. Are the outputs valid and complete?
+3. {"Were exploration questions answered?" if is_exploratory else "Is the figures PDF ready?"}
+4. Any statistical or methodological concerns?
+
+Be specific about what succeeded and what needs attention.""",
+        image_paths=[str(f) for f in output_files if f.suffix.lower() in ['.png', '.jpg', '.jpeg']][:5],
+        max_tokens=3000,
+    )
+    tokens_used += TOKEN_PER_CALL * 2
+    
+    _show_agent("Bayes", bayes_review, truncate=1500)
+    
+    # Step 4: Dayhoff assesses overall results
+    dayhoff_assess = await dayhoff.arespond(f"""Bayes has reviewed the execution:
 
 {bayes_review[:2000]}
 
-EXECUTION RESULTS:
-{str(execution_results)[:1500]}
+EXECUTION SUMMARY:
+- {successes}/{len(execution_results)} scripts succeeded
+{"- Figures PDF exists: " + str(figures_exist) if not is_exploratory else ""}
 
-Please assess:
-1. Did the {"exploration" if is_exploratory else "analysis"} successfully address the plan?
-2. Are there critical issues that need fixing?
-3. {"What did we learn that should inform the complete analysis?" if is_exploratory else "Are the PRIMARY OUTPUTS ready?"}
+OUTPUT FILES: {[f.name for f in output_files[:15]]}
 
-Respond with either:
-- "SUCCESSFUL: [summary of results]" if we can proceed
-- "NEEDS ITERATION: [what to fix]" if we need another attempt""", max_tokens=2000)
-        tokens_used += TOKEN_PER_CALL
-        
-        _show_agent("Dayhoff", dayhoff_assess, truncate=1000)
-        
-        if "SUCCESSFUL" in dayhoff_assess.upper():
-            execution_successful = True
-            results_summary = dayhoff_assess
-        else:
-            # Update execution plan for next iteration
-            execution_plan = f"{execution_plan}\n\n## ITERATION {iteration} FEEDBACK:\n{dayhoff_assess}"
+Please provide final assessment:
+1. Did we {"complete the exploration successfully" if is_exploratory else "generate the required outputs"}?
+2. Are there critical failures that block progress?
+3. {"What did we learn for complete analysis?" if is_exploratory else "Is the figures PDF ready for write-up?"}
+
+CRITICAL: If the figures PDF does not exist for complete execution, this is a FAILURE.
+
+Respond with:
+- "SUCCESSFUL: [summary]" if we can proceed to next stage
+- "NEEDS ITERATION: [specific issues]" if we need to regenerate scripts""", max_tokens=2000)
+    tokens_used += TOKEN_PER_CALL
+    
+    _show_agent("Dayhoff", dayhoff_assess, truncate=1000)
+    
+    execution_successful = "SUCCESSFUL" in dayhoff_assess.upper() and all_succeeded
+    
+    # For complete execution, also require figures PDF to exist
+    if not is_exploratory and not figures_exist:
+        execution_successful = False
+        print("    ⚠️ Figures PDF not found - execution incomplete")
     
     return {
         "success": execution_successful,
         "tokens_used": tokens_used,
-        "results": results_summary,
+        "results": dayhoff_assess,
         "needs_iteration": not execution_successful,
-        "iterations": iteration,
+        "script_results": execution_results,
+        "figures_exist": figures_exist if not is_exploratory else None,
     }
