@@ -1,7 +1,7 @@
 """
 Single Analysis Entry Point
 
-Runs a comprehensive guild-based research analysis workflow.
+Runs the comprehensive 7-stage MiniLab research analysis workflow.
 """
 
 import asyncio
@@ -11,90 +11,119 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from MiniLab import load_agents
-from MiniLab.orchestrators.single_analysis import run_single_analysis
+from MiniLab.agents.registry import load_agents
+from MiniLab.orchestrators.single_analysis import run_single_analysis, _ask_user_permission
 from MiniLab.storage.transcript import TranscriptLogger
 
 
 async def main():
     print("\n" + "=" * 80)
-    print("MiniLab - Single Analysis Mode")
+    print("MiniLab - Single Analysis")
     print("=" * 80)
-    print("\nThis mode runs a comprehensive 4-stage guild-based research workflow:")
-    print("  1. Guild leads create initial analysis plans")
-    print("  2. Guild members collaborate and provide feedback")
-    print("  3. Bohr synthesizes all inputs into a master plan")
-    print("  4. Execute plan with delegation and iteration until complete, revisiting earlier stages as needed")
+    print("\nThis workflow produces 3 primary outputs:")
+    print("  • XXX_figures.pdf - Nature-style 4-6 panel figure")
+    print("  • XXX_legends.md - Figure legends")
+    print("  • XXX_summary.md - Mini-paper (Intro, Discussion, Methods, References)")
+    print("\nWorkflow Stages:")
+    print("  0. Confirm files and project naming")
+    print("  1. Build project structure and summarize data")
+    print("  2. Plan analysis (Synthesis → Theory → Implementation cores)")
+    print("  3. Exploratory execution (if needed)")
+    print("  4. Complete execution")
+    print("  5. Write-up (legends, summary)")
+    print("  6. Critical review")
     print("\nFeatures:")
-    print("  • Goal-driven execution (continues until deliverables complete)")
-    print("  • Token Budget: 100,000 tokens")
-    print("  • Interactive: Press Enter anytime during execution to pause and provide guidance")
-    print("  • Each iteration = one round of Bohr coordinating with team to take actions")
+    print("  • User checkpoints at each stage")
+    print("  • Parallel agent consultation where beneficial")
+    print("  • Cross-agent collaboration (any agent can ask others)")
+    print("  • Package install requires your approval")
+    print("  • ReadData/ is READ-ONLY, Sandbox/ is READ-WRITE")
     print("=" * 80 + "\n")
     
     # Get research question
-    print("Enter your research question:")
+    print("Enter your research question (include the ReadData path):")
+    print("Example: Analyze the files in ReadData/Pluvicto/ to study treatment response")
     research_question = input("> ").strip()
     
     if not research_question:
         print("No research question provided. Exiting.")
         return
     
-    # Output directory - orchestrator will create properly named subdirectory
-    output_dir = Path(__file__).parent.parent / "Outputs"
-    
     print("\nLoading agents...")
     
-    agents = load_agents()
+    # Load agents with permission callback for package installs
+    agents = load_agents(permission_callback=_ask_user_permission)
     
-    print(f"Loaded {len(agents)} agents")
+    print(f"Loaded {len(agents)} agents:")
+    for agent_id, agent in agents.items():
+        print(f"  • {agent.display_name} ({agent.role})")
+    
     print("\nInitializing transcript logger...")
     
     # Initialize transcript logger
     transcripts_dir = Path(__file__).parent.parent / "Transcripts"
     logger = TranscriptLogger(transcripts_dir)
     
-    # Note: Session name will be updated after Stage 0 determines project name
-    # For now, use a temporary name
-    temp_session_name = f"single_analysis_{research_question[:30].replace(' ', '_')}"
-    logger.start_session(temp_session_name)
+    # Temporary session name (updated after project naming)
+    temp_name = research_question[:40].replace(' ', '_').replace('/', '_')
+    logger.start_session(f"analysis_{temp_name}")
     
     # Log the research question
     logger.log_user_message(research_question)
     
     print("\nStarting Single Analysis workflow...\n")
-    
-    # Run the analysis
-    result = await run_single_analysis(
-        agents=agents,
-        research_question=research_question,
-        output_dir=output_dir,
-        max_tokens=100_000,
-        logger=logger,
-    )
-    
-    # Update session name with actual project name
-    if result.get("project_name"):
-        logger.update_session_name(f"single_analysis_{result['project_name']}")
-    
-    # Save transcript
-    print("\nSaving transcript...")
-    transcript_path = logger.save_transcript()
-    print(f"Transcript saved to: {transcript_path}")
-    
-    # Display summary
-    print("\n" + "=" * 80)
-    print("ANALYSIS SUMMARY")
     print("=" * 80)
-    print(f"Research Question: {result['research_question']}")
-    print(f"Output Directory: {result['output_dir']}")
-    print(f"Total Tokens Used: ~{result['token_count']:,}")
-    print(f"\nStages Completed:")
-    print(f"  Stage 1 (Plans): {result['stages_completed']['stage_1_plans']} guilds")
-    print(f"  Stage 2 (Collaboration): {result['stages_completed']['stage_2_collaborations']} guilds")
-    print(f"  Stage 3 (Synthesis): {'Yes' if result['stages_completed']['stage_3_synthesis'] else 'No'}")
-    print(f"  Stage 4 (Execution): {result['stages_completed']['stage_4_iterations']} iterations")
-    print("=" * 80 + "\n")
+    
+    try:
+        # Run the analysis
+        result = await run_single_analysis(
+            agents=agents,
+            research_question=research_question,
+            max_tokens=2_000_000,
+            logger=logger,
+        )
+        
+        # Update session name with actual project name
+        if result.get("project_name"):
+            logger.update_session_name(f"analysis_{result['project_name']}")
+        
+        # Save transcript
+        print("\nSaving transcript...")
+        transcript_path = logger.save_transcript()
+        print(f"Transcript saved to: {transcript_path}")
+        
+        # Display summary
+        print("\n" + "=" * 80)
+        print("ANALYSIS COMPLETE")
+        print("=" * 80)
+        
+        if result.get("success"):
+            print(f"\n✓ Project: {result.get('project_name')}")
+            print(f"✓ Location: {result.get('project_path')}")
+            print(f"✓ Tokens used: ~{result.get('tokens_used', 0):,}")
+            
+            outputs = result.get("outputs", {})
+            print("\nPrimary Outputs:")
+            for name, path in outputs.items():
+                exists = Path(path).exists()
+                status = "✓" if exists else "⚠"
+                print(f"  {status} {name}: {path}")
+        else:
+            print(f"\n✗ Workflow failed: {result.get('error', 'Unknown error')}")
+        
+        print("=" * 80 + "\n")
+        
+    except KeyboardInterrupt:
+        print("\n\nWorkflow interrupted by user.")
+        transcript_path = logger.save_transcript()
+        print(f"Partial transcript saved to: {transcript_path}")
+    
+    except Exception as e:
+        print(f"\n\nError during workflow: {e}")
+        import traceback
+        traceback.print_exc()
+        transcript_path = logger.save_transcript()
+        print(f"Transcript saved to: {transcript_path}")
 
 
 if __name__ == "__main__":
