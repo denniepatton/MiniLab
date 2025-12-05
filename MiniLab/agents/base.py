@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from MiniLab.llm_backends.base import ChatMessage, LLMBackend
+
+
+# Maximum iterations for agentic loops to prevent runaway
+MAX_AGENTIC_ITERATIONS = 15
 
 
 @dataclass
@@ -306,4 +312,261 @@ Please provide a focused, helpful response. Be concise but thorough."""
             max_tokens=max_tokens
         )
         return reply
+
+    async def agentic_execute(
+        self,
+        task: str,
+        context: str = "",
+        max_iterations: int = MAX_AGENTIC_ITERATIONS,
+        max_tokens_per_step: int = 2000,
+        verbose: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Execute a task with full agentic capabilities (ReAct-style loop).
+        
+        The agent can:
+        - Think about what to do next
+        - Use tools and see results
+        - Consult colleagues and incorporate their input
+        - Iterate until the task is complete
+        
+        This is the TRUE agentic mode - like a VS Code agent.
+        
+        Args:
+            task: The task to accomplish
+            context: Additional context
+            max_iterations: Safety limit on iterations
+            max_tokens_per_step: Tokens per reasoning step
+            verbose: Print progress
+            
+        Returns:
+            Dict with 'success', 'result', 'iterations', 'tool_calls', etc.
+        """
+        # Build tool descriptions
+        tool_descriptions = self._build_tool_descriptions()
+        colleague_descriptions = self._build_colleague_descriptions()
+        
+        system_prompt = f"""You are {self.display_name}, {self.role} in the MiniLab team.
+
+{self.persona}
+
+You are operating in AGENTIC MODE. You can:
+1. THINK about what to do
+2. USE TOOLS to take actions  
+3. ASK COLLEAGUES for help
+4. OBSERVE results and continue
+
+AVAILABLE TOOLS:
+{tool_descriptions}
+
+AVAILABLE COLLEAGUES:
+{colleague_descriptions}
+
+HOW TO USE TOOLS:
+When you want to use a tool, output a JSON block like this:
+```tool
+{{"tool": "tool_name", "action": "action_name", "params": {{"key": "value"}}}}
+```
+
+HOW TO ASK A COLLEAGUE:
+```colleague
+{{"colleague": "agent_id", "question": "Your question here"}}
+```
+
+HOW TO SIGNAL COMPLETION:
+When you've finished the task, output:
+```done
+{{"result": "Summary of what you accomplished", "outputs": ["list", "of", "files", "created"]}}
+```
+
+WORKFLOW:
+1. Think step by step about what you need to do
+2. Use tools/colleagues as needed
+3. Observe results and adjust
+4. When complete, signal done
+
+Be concise. Act, don't just describe what you would do.
+"""
+        
+        messages: List[ChatMessage] = [
+            {"role": "system", "content": system_prompt},
+        ]
+        
+        if context:
+            messages.append({"role": "system", "content": f"Context:\n{context}"})
+        
+        messages.append({"role": "user", "content": f"TASK: {task}"})
+        
+        # Tracking
+        iterations = 0
+        tool_calls = []
+        colleague_calls = []
+        all_outputs = []
+        
+        while iterations < max_iterations:
+            iterations += 1
+            
+            if verbose:
+                print(f"      [{self.display_name}] Iteration {iterations}...")
+            
+            # Get agent's response
+            response = await self.backend.acomplete(messages, max_tokens=max_tokens_per_step)
+            
+            # Add response to conversation
+            messages.append({"role": "assistant", "content": response})
+            
+            # Check for completion
+            done_match = re.search(r'```done\s*\n(.*?)\n```', response, re.DOTALL)
+            if done_match:
+                try:
+                    done_data = json.loads(done_match.group(1))
+                    if verbose:
+                        print(f"      [{self.display_name}] ✓ Task complete")
+                    return {
+                        "success": True,
+                        "result": done_data.get("result", response),
+                        "outputs": done_data.get("outputs", all_outputs),
+                        "iterations": iterations,
+                        "tool_calls": tool_calls,
+                        "colleague_calls": colleague_calls,
+                        "final_response": response,
+                    }
+                except json.JSONDecodeError:
+                    pass  # Continue if JSON is malformed
+            
+            # Check for tool calls
+            tool_match = re.search(r'```tool\s*\n(.*?)\n```', response, re.DOTALL)
+            if tool_match:
+                try:
+                    tool_data = json.loads(tool_match.group(1))
+                    tool_name = tool_data.get("tool")
+                    action = tool_data.get("action")
+                    params = tool_data.get("params", {})
+                    
+                    if verbose:
+                        print(f"        🔧 Using {tool_name}.{action}...")
+                    
+                    # Execute the tool
+                    result = await self.use_tool(tool_name, action, **params)
+                    tool_calls.append({
+                        "tool": tool_name,
+                        "action": action,
+                        "params": params,
+                        "result": result,
+                    })
+                    
+                    # Format result for agent
+                    result_str = json.dumps(result, indent=2, default=str)
+                    if len(result_str) > 3000:
+                        result_str = result_str[:3000] + "\n... (truncated)"
+                    
+                    # Add observation to conversation
+                    messages.append({
+                        "role": "user",
+                        "content": f"TOOL RESULT ({tool_name}.{action}):\n```\n{result_str}\n```\n\nContinue with your task."
+                    })
+                    
+                    if result.get("success"):
+                        if "path" in result:
+                            all_outputs.append(result["path"])
+                    
+                    continue  # Get next response
+                    
+                except json.JSONDecodeError as e:
+                    messages.append({
+                        "role": "user",
+                        "content": f"ERROR: Could not parse tool call JSON: {e}. Please use valid JSON format."
+                    })
+                    continue
+            
+            # Check for colleague consultation
+            colleague_match = re.search(r'```colleague\s*\n(.*?)\n```', response, re.DOTALL)
+            if colleague_match:
+                try:
+                    colleague_data = json.loads(colleague_match.group(1))
+                    colleague_id = colleague_data.get("colleague")
+                    question = colleague_data.get("question")
+                    
+                    if verbose:
+                        print(f"        💬 Asking {colleague_id}...")
+                    
+                    # Ask the colleague
+                    result = await self.ask_colleague(
+                        colleague_id, 
+                        question,
+                        context=f"Working on: {task}",
+                    )
+                    colleague_calls.append({
+                        "colleague": colleague_id,
+                        "question": question,
+                        "result": result,
+                    })
+                    
+                    if result.get("success"):
+                        colleague_response = result.get("response", "No response")
+                        if len(colleague_response) > 2000:
+                            colleague_response = colleague_response[:2000] + "\n... (truncated)"
+                        
+                        messages.append({
+                            "role": "user",
+                            "content": f"COLLEAGUE RESPONSE ({result.get('colleague')}):\n{colleague_response}\n\nContinue with your task."
+                        })
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": f"COLLEAGUE ERROR: {result.get('error')}. Available: {result.get('available_colleagues')}"
+                        })
+                    
+                    continue
+                    
+                except json.JSONDecodeError as e:
+                    messages.append({
+                        "role": "user",
+                        "content": f"ERROR: Could not parse colleague call JSON: {e}. Please use valid JSON format."
+                    })
+                    continue
+            
+            # No special blocks found - agent is just thinking/responding
+            # Prompt to continue or finish
+            if iterations < max_iterations - 1:
+                messages.append({
+                    "role": "user",
+                    "content": "Continue working on the task. Use tools if needed, or signal ```done``` when complete."
+                })
+        
+        # Max iterations reached
+        if verbose:
+            print(f"      [{self.display_name}] ⚠️ Max iterations reached")
+        
+        return {
+            "success": False,
+            "error": f"Max iterations ({max_iterations}) reached without completion",
+            "iterations": iterations,
+            "tool_calls": tool_calls,
+            "colleague_calls": colleague_calls,
+            "partial_result": messages[-1].get("content", "") if messages else "",
+        }
+    
+    def _build_tool_descriptions(self) -> str:
+        """Build descriptions of available tools for agentic mode."""
+        if not self.tool_instances:
+            return "None"
+        
+        descriptions = []
+        for name, tool in self.tool_instances.items():
+            desc = getattr(tool, 'description', 'No description')
+            descriptions.append(f"- {name}: {desc}")
+        
+        return "\n".join(descriptions)
+    
+    def _build_colleague_descriptions(self) -> str:
+        """Build descriptions of available colleagues."""
+        if not self.colleagues:
+            return "None"
+        
+        descriptions = []
+        for agent_id, agent in self.colleagues.items():
+            descriptions.append(f"- {agent_id}: {agent.display_name} ({agent.role})")
+        
+        return "\n".join(descriptions)
 
