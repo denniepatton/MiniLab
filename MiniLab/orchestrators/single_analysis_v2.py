@@ -1298,6 +1298,312 @@ BE HARSH. List every issue you find. This is peer review.""",
 # =============================================================================
 
 MAX_FIX_ATTEMPTS_PER_SCRIPT = 5  # Max attempts to fix a single script
+MAX_BUILD_ITERATIONS = 10  # Max iterations for iterative script building
+
+
+async def _build_script_iteratively(
+    hinton: Agent,
+    script_spec: str,
+    script_name: str,
+    project_name: str,
+    project_path: Path,
+    workspace_root: Path,
+    is_exploratory: bool,
+    tokens_used: int,
+) -> tuple[str, bool, int]:
+    """
+    Build a script ITERATIVELY like a VS Code agent.
+    
+    Instead of generating the whole script in one shot (which truncates),
+    Hinton builds the script piece by piece:
+    1. Write imports and setup
+    2. Check syntax
+    3. Write each function
+    4. Check syntax after each
+    5. Write main block
+    6. Full validation
+    7. Run and see actual output
+    8. Fix based on real errors
+    9. Iterate until complete and working
+    
+    Returns: (final_code, success, tokens_used)
+    """
+    output_dir_name = "scratch" if is_exploratory else "outputs"
+    script_path = project_path / "scripts" / script_name
+    pkg_constraints = get_package_constraint_prompt()
+    
+    # Initialize with empty script
+    current_code = ""
+    build_phase = "imports"  # imports -> functions -> main -> complete
+    
+    print(f"      🔨 Building script iteratively...")
+    
+    for iteration in range(1, MAX_BUILD_ITERATIONS + 1):
+        print(f"        Iteration {iteration}/{MAX_BUILD_ITERATIONS} - Phase: {build_phase}")
+        
+        if build_phase == "imports":
+            # PHASE 1: Generate imports and initial setup
+            prompt = f"""Write the IMPORTS and INITIAL SETUP for this Python script.
+
+TASK: {script_spec[:1500]}
+
+{pkg_constraints}
+
+Write ONLY the imports and any global constants/configuration.
+Include:
+- All necessary imports
+- np.random.seed(42)
+- Path definitions for ReadData/ and Sandbox/{project_name}/{output_dir_name}/
+
+Provide ONLY Python code in a ```python``` block. Just imports and setup, NOT the functions or main block yet."""
+
+            response = await hinton.arespond(prompt, max_tokens=1000)
+            tokens_used += TOKEN_PER_CALL
+            
+            code_chunk = extract_code_from_response(response)
+            if code_chunk:
+                current_code = code_chunk
+                
+                # Validate syntax
+                is_valid, error = validate_python_syntax(current_code)
+                if is_valid:
+                    print(f"          ✓ Imports valid")
+                    build_phase = "functions"
+                else:
+                    print(f"          ✗ Syntax error in imports: {error}")
+                    # Fix it
+                    fix_prompt = f"""Fix this syntax error in the imports:
+
+ERROR: {error}
+
+CODE:
+```python
+{current_code}
+```
+
+Provide the corrected imports section only, in a ```python``` block."""
+                    fix_response = await hinton.arespond(fix_prompt, max_tokens=1000)
+                    tokens_used += TOKEN_PER_CALL
+                    fixed = extract_code_from_response(fix_response)
+                    if fixed:
+                        current_code = fixed
+                    # Stay in imports phase to re-validate
+            else:
+                print(f"          ⚠️ No code generated for imports")
+                
+        elif build_phase == "functions":
+            # PHASE 2: Generate the functions/logic
+            prompt = f"""Now write the FUNCTIONS for this script.
+
+TASK: {script_spec[:1500]}
+
+CURRENT CODE (imports already written):
+```python
+{current_code}
+```
+
+Write the FUNCTION DEFINITIONS that implement the main logic.
+Include docstrings and print statements for progress tracking.
+
+CRITICAL: Write ALL functions needed. Do NOT abbreviate with "..." or "similar for other cases".
+Write complete, working functions.
+
+Provide ONLY the new function definitions in a ```python``` block.
+Do NOT repeat the imports - I will append your functions to the existing code."""
+
+            response = await hinton.arespond(prompt, max_tokens=SCRIPT_TOKEN_LIMIT - 500)
+            tokens_used += TOKEN_PER_CALL
+            
+            code_chunk = extract_code_from_response(response)
+            if code_chunk:
+                # Combine imports + functions
+                test_code = current_code + "\n\n" + code_chunk
+                
+                # Validate syntax
+                is_valid, error = validate_python_syntax(test_code)
+                if is_valid:
+                    print(f"          ✓ Functions valid")
+                    current_code = test_code
+                    build_phase = "main"
+                else:
+                    print(f"          ✗ Syntax error in functions: {error[:100]}")
+                    # Fix the functions
+                    fix_prompt = f"""Fix this syntax error in the functions:
+
+ERROR: {error}
+
+FUNCTIONS CODE:
+```python
+{code_chunk}
+```
+
+Provide the corrected functions in a ```python``` block."""
+                    fix_response = await hinton.arespond(fix_prompt, max_tokens=SCRIPT_TOKEN_LIMIT - 500)
+                    tokens_used += TOKEN_PER_CALL
+                    fixed = extract_code_from_response(fix_response)
+                    if fixed:
+                        test_code = current_code + "\n\n" + fixed
+                        is_valid2, _ = validate_python_syntax(test_code)
+                        if is_valid2:
+                            current_code = test_code
+                            build_phase = "main"
+            else:
+                print(f"          ⚠️ No code generated for functions")
+                
+        elif build_phase == "main":
+            # PHASE 3: Generate the main block
+            prompt = f"""Now write the MAIN BLOCK for this script.
+
+TASK: {script_spec[:1000]}
+
+CURRENT CODE (imports and functions already written):
+```python
+{current_code}
+```
+
+Write the `if __name__ == "__main__":` block that:
+1. Calls the functions above
+2. Saves outputs to Sandbox/{project_name}/{output_dir_name}/
+3. Ends with: print("SCRIPT COMPLETE: [list of output files]")
+
+Provide ONLY the main block in a ```python``` block.
+Do NOT repeat imports or functions - I will append your main block."""
+
+            response = await hinton.arespond(prompt, max_tokens=2000)
+            tokens_used += TOKEN_PER_CALL
+            
+            code_chunk = extract_code_from_response(response)
+            if code_chunk:
+                # Ensure it has the main guard
+                if 'if __name__' not in code_chunk:
+                    code_chunk = 'if __name__ == "__main__":\n    ' + code_chunk.replace('\n', '\n    ')
+                
+                # Combine all parts
+                full_code = current_code + "\n\n" + code_chunk
+                
+                # Validate syntax
+                is_valid, error = validate_python_syntax(full_code)
+                if is_valid:
+                    print(f"          ✓ Main block valid")
+                    current_code = full_code
+                    build_phase = "complete"
+                else:
+                    print(f"          ✗ Syntax error in main: {error[:100]}")
+                    # Fix it
+                    fix_prompt = f"""Fix this syntax error in the main block:
+
+ERROR: {error}
+
+MAIN BLOCK:
+```python
+{code_chunk}
+```
+
+Provide the corrected main block in a ```python``` block."""
+                    fix_response = await hinton.arespond(fix_prompt, max_tokens=2000)
+                    tokens_used += TOKEN_PER_CALL
+                    fixed = extract_code_from_response(fix_response)
+                    if fixed:
+                        if 'if __name__' not in fixed:
+                            fixed = 'if __name__ == "__main__":\n    ' + fixed.replace('\n', '\n    ')
+                        full_code = current_code + "\n\n" + fixed
+                        is_valid2, _ = validate_python_syntax(full_code)
+                        if is_valid2:
+                            current_code = full_code
+                            build_phase = "complete"
+            else:
+                print(f"          ⚠️ No code generated for main block")
+                
+        elif build_phase == "complete":
+            # PHASE 4: Validate and run
+            print(f"        📋 Full validation...")
+            
+            # Dry-run validation
+            dry_ok, dry_error = dry_run_validation(current_code, workspace_root)
+            if not dry_ok:
+                print(f"          ✗ Dry-run failed: {dry_error[:100]}")
+                # Fix the issue
+                fix_prompt = f"""Fix this validation error:
+
+ERROR: {dry_error}
+
+{pkg_constraints}
+
+CURRENT SCRIPT:
+```python
+{current_code[:MAX_CODE_CONTEXT]}
+```
+
+Provide the COMPLETE fixed script in a ```python``` block."""
+                fix_response = await hinton.arespond(fix_prompt, max_tokens=FIX_TOKEN_LIMIT)
+                tokens_used += TOKEN_PER_CALL
+                fixed = extract_code_from_response(fix_response)
+                if fixed:
+                    current_code = fixed
+                continue  # Re-validate
+            
+            print(f"          ✓ Dry-run passed")
+            
+            # Save and run the script
+            with open(script_path, 'w') as f:
+                f.write(current_code)
+            
+            print(f"        🚀 Running script...")
+            try:
+                result = subprocess.run(
+                    ["micromamba", "run", "-n", "minilab", "python", str(script_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    cwd=str(workspace_root),
+                )
+                
+                if result.returncode == 0:
+                    print(f"          ✓ SUCCESS!")
+                    output_preview = result.stdout[-500:] if result.stdout else ""
+                    print(f"          Output: {output_preview[:200]}...")
+                    return current_code, True, tokens_used
+                else:
+                    error_msg = result.stderr if result.stderr else result.stdout
+                    print(f"          ✗ Runtime error")
+                    print(f"          Error: {error_msg[:200]}...")
+                    
+                    # Get documentation for fix
+                    api_docs = get_documentation_for_code(current_code, max_chars=MAX_DOC_CHARS)
+                    
+                    # Have Hinton fix based on actual error
+                    fix_prompt = f"""The script ran but got this error:
+
+ERROR:
+{error_msg[:MAX_ERROR_CHARS]}
+
+{pkg_constraints}
+
+{api_docs if api_docs else ""}
+
+CURRENT SCRIPT:
+```python
+{current_code}
+```
+
+Fix the error and provide the COMPLETE corrected script in a ```python``` block."""
+                    
+                    fix_response = await hinton.arespond(fix_prompt, max_tokens=FIX_TOKEN_LIMIT)
+                    tokens_used += TOKEN_PER_CALL
+                    fixed = extract_code_from_response(fix_response)
+                    if fixed:
+                        current_code = fixed
+                    # Stay in complete phase to re-run
+                    
+            except subprocess.TimeoutExpired:
+                print(f"          ✗ Timeout (5 min)")
+                return current_code, False, tokens_used
+    
+    # Max iterations reached
+    print(f"        ⚠️ Max iterations ({MAX_BUILD_ITERATIONS}) reached")
+    with open(script_path, 'w') as f:
+        f.write(current_code)
+    return current_code, False, tokens_used
 
 
 async def _generate_single_script(
@@ -1309,10 +1615,10 @@ async def _generate_single_script(
     tokens_used: int,
 ) -> tuple[str, int]:
     """
-    Generate a single script with Hinton.
+    DEPRECATED: Use _build_script_iteratively instead.
     
-    Includes package constraints and clear requirements to prevent
-    hallucinated imports and truncated code.
+    This is kept for compatibility but should not be used.
+    Single-shot generation leads to truncated scripts.
     
     Returns: (script_code, tokens_used)
     """
@@ -1681,71 +1987,46 @@ List scripts in execution order.""", max_tokens=4000)
     for name, _ in script_specs:
         print(f"      - {name}")
     
-    # Step 2: Generate and run each script sequentially with iterative fixing
-    _print_substage("Generating and Running Scripts (Sequentially)")
+    # Step 2: Build and run each script ITERATIVELY (like VS Code agent)
+    _print_substage("Building and Running Scripts (Iterative Approach)")
     
     execution_results = {}
     all_succeeded = True
     
     for idx, (script_name, script_spec) in enumerate(script_specs, 1):
         print(f"\n    [{idx}/{len(script_specs)}] {script_name}")
+        print(f"      📝 Building iteratively (not single-shot)...")
         
-        # Generate the script
-        print(f"      Generating...")
-        script_code, tokens_used = await _generate_single_script(
-            hinton, script_spec, project_name, project_path, is_exploratory, tokens_used
+        # Build the script iteratively - Hinton writes, checks, runs, fixes
+        script_code, success, tokens_used = await _build_script_iteratively(
+            hinton=hinton,
+            script_spec=script_spec,
+            script_name=script_name,
+            project_name=project_name,
+            project_path=project_path,
+            workspace_root=workspace_root,
+            is_exploratory=is_exploratory,
+            tokens_used=tokens_used,
         )
         
-        if not script_code:
-            print(f"      ⚠️ Failed to generate script code")
-            execution_results[script_name] = {"success": False, "error": "No code generated"}
-            all_succeeded = False
-            continue
-        
-        # PRE-EXECUTION CRITIQUE (inspired by CellVoyager)
-        # Have Bayes review the code BEFORE running to catch obvious issues
-        print(f"      Pre-execution critique (Bayes)...")
-        critique, needs_revision, tokens_used = await _critique_script(
-            bayes, script_code, script_name, script_spec, tokens_used
-        )
-        
-        if needs_revision:
-            print(f"        ⚠️ Bayes found issues, requesting revision...")
-            # Have Hinton fix based on critique
-            fixed_code, tokens_used = await _fix_script(
-                hinton, script_code, 
-                f"Pre-execution code review found issues:\n{critique}",
-                script_name, 0, tokens_used
-            )
-            if fixed_code:
-                script_code = fixed_code
-                print(f"        ✓ Script revised based on critique")
+        if success:
+            print(f"      ✅ {script_name} - COMPLETE AND WORKING")
+            execution_results[script_name] = {
+                "success": True,
+                "output": "Built iteratively and executed successfully",
+                "attempts": 1,  # Iterations are internal
+            }
         else:
-            print(f"        ✓ Script looks correct")
-        
-        # Save script (possibly revised)
-        script_path = scripts_dir / script_name
-        with open(script_path, 'w') as f:
-            f.write(script_code)
-        
-        # Run with retry
-        print(f"      Running with retry loop...")
-        result, tokens_used = await _run_script_with_retry(
-            hinton, script_path, workspace_root, tokens_used
-        )
-        
-        execution_results[script_name] = result
-        
-        if not result["success"]:
+            print(f"      ❌ {script_name} - FAILED after max iterations")
+            execution_results[script_name] = {
+                "success": False,
+                "error": "Failed to build working script after max iterations",
+                "attempts": MAX_BUILD_ITERATIONS,
+            }
             all_succeeded = False
-            print(f"      ❌ FAILED after {result['attempts']} attempts")
-            # Continue to next script even if this one failed
-            # (some scripts may be independent)
-        else:
-            print(f"      ✓ Succeeded on attempt {result['attempts']}")
         
         # EARLY VLM CHECK: If this script produced images, have Bayes check them immediately
-        if result["success"]:
+        if success:
             output_dir = scratch_dir if is_exploratory else outputs_dir
             new_pngs = [f for f in output_dir.glob("*.png") if script_name.replace('.py', '') in f.stem.lower() or f.stem.startswith(script_name[:2])]
             if new_pngs:
