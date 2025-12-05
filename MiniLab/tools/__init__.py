@@ -6,20 +6,20 @@ from typing import Any, Dict
 __all__ = [
     "Tool", 
     "DualModeFileSystemTool",
-    "FileSystemTool",
     "EnvironmentTool",
     "WebSearchTool",
     "ArxivSearchTool", 
     "PubMedSearchTool",
     "CodeEditorTool",
     "TerminalTool",
+    "GitTool",
 ]
 
 
 class Tool(ABC):
     """
     Abstract base class for agent tools.
-    Each tool provides a specific capability (web search, Zotero access, etc.)
+    Each tool provides a specific capability (filesystem, web search, code editing, etc.)
     """
 
     def __init__(self, name: str, description: str):
@@ -38,9 +38,9 @@ class Tool(ABC):
         return f"<Tool: {self.name}>"
 
 
-# Import tools for convenience
+# Import active tools for convenience
 from .filesystem_dual import DualModeFileSystemTool
-from .filesystem import FileSystemTool
 from .environment import EnvironmentTool
 from .web_search import WebSearchTool, ArxivSearchTool, PubMedSearchTool
-from .code_editor import CodeEditorTool, TerminalTool
+from .code_editor import CodeEditorTool
+from .system_tools import TerminalTool, GitTool

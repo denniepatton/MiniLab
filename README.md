@@ -1,520 +1,272 @@
 # MiniLab
 
-**MiniLab** is a multi-agent scientific research assistant inspired by [VirtualLab](https://www.nature.com/articles/s41586-025-09442-9) and [CellVoyager](https://www.biorxiv.org/content/10.1101/2025.06.03.657517v1). It creates a collaborative team of AI agents, each with specialized expertise, to assist with scientific research including literature synthesis, experimental design, coding, statistical analysis, and idea generation.
+**MiniLab** is a multi-agent scientific research assistant inspired by [VirtualLab](https://www.nature.com/articles/s41586-025-09442-9) and [CellVoyager](https://www.biorxiv.org/content/10.1101/2025.06.03.657517v1). It creates a collaborative team of AI agents with specialized expertise to assist with scientific research—including literature synthesis, experimental design, coding, statistical analysis, and report generation.
 
-## Overview
+## Key Features
 
-MiniLab provides:
+- **9 Specialized Agents** with distinct personas but equal capabilities
+- **TRUE Agentic Execution**: Agents use tools autonomously in a ReAct-style loop
+- **Universal Tool Access**: All agents can read/write files, edit code, search the web, run terminal commands
+- **Cross-Agent Collaboration**: Any agent can consult any other agent in real-time
+- **Dual-Mode Filesystem**: ReadData/ (read-only) + Sandbox/ (read-write) for safe data handling
+- **Comprehensive Logging**: Full transcripts with timestamps and token tracking
 
-- **Specialized Agent Team**: 9 expert agents across directional, theory, and implementation guilds
-- **Living Bibliography**: Automatic citation tracking, knowledge graphs, and literature connections
-- **Project State Management**: Persistent storage of ideas, decisions, and meeting history
-- **Multi-LLM Support**: OpenAI, Anthropic Claude, and extensible to other providers
-- **Tool Integration**: Web search, Zotero, PubMed, arXiv, terminal, git, and filesystem access
-- **Daily Literature Digest**: Automated paper recommendations with connection analysis
+## Agent Team
 
-### Agent Team
+All agents use **Claude Sonnet 4** via Anthropic API and share the same tool capabilities. They differ only in their personas and specialized roles:
 
-**Directional Guild** (Vision & Domain Expertise):
-- **Franklin** (PI): Project synthesizer, computational oncologist, deep learning expert
-- **Watson** (Clinical Reviewer): Adversarial critic focused on feasibility
-- **Carroll** (Librarian): Literature management, Zotero integration, knowledge graphs
-
-**Theory Guild** (Conceptual Development):
-- **Feynman** (Physicist): Conceptual clarity, back-of-the-envelope checks
-- **Shannon** (Information Theorist): Causal design, identifiability, information content
-- **Greider** (Molecular Biologist): Mechanistic grounding, experimental viability
-
-**Implementation Guild** (Execution):
-- **Bayes** (Statistician): Bayesian inference, uncertainty quantification
-- **Lee** (CS Engineer): Code quality, infrastructure, reproducibility
-- **Dayhoff** (Bioinformatician): Data pipelines, synthesis of theory and practice
+| Agent | Role | Specialty |
+|-------|------|-----------|
+| **Bohr** | Project Lead | Coordination, integration, decision-making |
+| **Farber** | Critical Reviewer | Clinical relevance, feasibility, catching errors |
+| **Gould** | Librarian & Writer | Literature review, citations, figure legends, summaries |
+| **Feynman** | Creative Theorist | Naive questions, unconventional approaches, physics analogies |
+| **Shannon** | Methodologist | Experimental design, causality, statistical methods |
+| **Greider** | Biological Expert | Molecular mechanisms, biological plausibility |
+| **Bayes** | Statistician | Statistical analysis, clinical trial design |
+| **Hinton** | Primary Coder | Script development, debugging, code execution |
+| **Dayhoff** | Analysis Architect | Translating plans into executable analyses |
 
 ## Installation
 
 ### Prerequisites
 
-- **macOS** (or Linux/Windows with micromamba/conda)
+- **macOS** (or Linux)
 - **micromamba** (or conda/mamba)
-- **Python 3.10+**
-- **API Keys**: OpenAI and/or Anthropic (see `.env.example`)
+- **Python 3.11+**
+- **Anthropic API Key**
 
-### Setup with Micromamba
+### Setup
 
-1. **Clone the repository** (or if you already have it locally, navigate to it):
-   ```bash
-   cd /Users/robertpatton/MiniLab
-   ```
+```bash
+# Clone repository
+git clone https://github.com/denniepatton/MiniLab.git
+cd MiniLab
 
-2. **Create micromamba environment**:
-   ```bash
-   micromamba env create -f environment.yml
-   micromamba activate minilab
-   ```
+# Create environment
+micromamba env create -f environment.yml
+micromamba activate minilab
 
-3. **Install MiniLab in development mode**:
-   ```bash
-   pip install -e .
-   ```
+# Install in development mode
+pip install -e .
 
-4. **Configure environment variables**:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your API keys (use nano, vim, or any text editor)
-   ```
+# Configure API key
+echo "ANTHROPIC_API_KEY=your_key_here" > .env
 
-5. **Verify installation**:
-   ```bash
-   python -c "from MiniLab import load_agents; print('✓ MiniLab installed successfully')"
-   ```
-
-### Required API Keys
-
-Edit `.env` with your credentials:
-
-- `OPENAI_API_KEY`: For GPT-4 models (Franklin, Watson, Carroll, Bayes, Lee, Dayhoff)
-- `ANTHROPIC_API_KEY`: For Claude models (Feynman, Shannon)
-- `ZOTERO_API_KEY` & `ZOTERO_USER_ID`: (Optional) For Carroll's library management
-- `TAVILY_API_KEY`: (Optional) For enhanced web search
-- `NCBI_EMAIL`: (Optional) For PubMed API rate limit improvements
+# Verify installation
+python -c "from MiniLab import load_agents; print('✓ MiniLab ready')"
+```
 
 ## Quick Start
 
-### Modes of Operation
+### Run Single Analysis Workflow
 
-MiniLab offers two primary interaction modes:
+```bash
+python scripts/run_single_analysis.py
+```
 
-#### 1. Main Menu (Recommended)
-Launch the interactive menu to choose your mode:
+This launches the comprehensive 7-stage research workflow:
+
+1. **Stage 0**: Confirm files and project naming
+2. **Stage 1**: Build project structure, summarize data
+3. **Stage 2**: Plan analysis (Synthesis → Theory → Implementation cores)
+4. **Stage 3**: Exploratory execution (if needed)
+5. **Stage 4**: Complete execution with iterative debugging
+6. **Stage 5**: Write-up (legends, summary with citations)
+7. **Stage 6**: Critical review
+
+**Primary Outputs** (saved to `Sandbox/ProjectName/`):
+- `ProjectName_figures.pdf` - 4-6 panel Nature-style figure
+- `ProjectName_legends.md` - Figure legends
+- `ProjectName_summary.md` - Mini-paper with citations
+
+### Interactive Mode
+
 ```bash
 python scripts/minilab.py
 ```
 
-**Available modes:**
-- **Single Analysis**: Comprehensive guild-based research workflow (1M token budget)
-- **Regular Meeting**: Interactive conversation with Franklin who coordinates the team (300k token budget)
-
-#### 2. Direct Scripts
-
-**Interactive PI-Coordinated Meeting:**
-```bash
-python scripts/run_user_meeting.py
-```
-Chat with Franklin who delegates to team members as needed. Continuous conversation mode with full transcript logging.
-
-**Single Analysis Workflow:**
-```bash
-python scripts/run_single_analysis.py
-```
-Runs a comprehensive 4-stage guild-based analysis:
-1. Guild leads create initial plans
-2. Guild members collaborate and provide feedback
-3. Franklin synthesizes into master plan
-4. Execute with iteration until complete
-
-### Basic Programmatic Usage
-
-```python
-import asyncio
-from MiniLab import load_agents
-from MiniLab.orchestrators.meetings import run_pi_coordinated_meeting
-from MiniLab.storage.transcript import TranscriptLogger
-
-async def main():
-    # Load all agents
-### Core Components
-
-```
-MiniLab/
-├── agents/          # Agent definitions and registry
-├── llm_backends/    # LLM provider interfaces (OpenAI, Anthropic)
-├── orchestrators/   # Meeting coordination and workflows
-│   ├── meetings.py       # PI-coordinated team meetings
-│   └── single_analysis.py # 4-stage guild-based research workflow
-├── storage/         # Project state, citations, transcripts
-│   ├── state_store.py    # Project persistence
-│   └── transcript.py     # Conversation logging
-├── tools/           # Agent capabilities
-### Key Abstractions
-
-- **Agent**: Represents a team member with expertise, persona, and LLM backend
-- **Tool**: Reusable capability with security controls:
-  - **DualModeFileSystemTool**: Sandbox (full RW access) + ReadData (RO access only)
-  - **EnvironmentTool**: Package installation with permission prompts (minilab env only)
-  - **CitationTool**: Citation fetching with DOI links
-- **ProjectState**: Persistent storage of citations, ideas, decisions, and graphs
-- **Meeting**: Orchestration pattern for agent collaboration
-- **TranscriptLogger**: Automatic conversation logging with timestamps and token counts
-```     logger=logger,
-    )
-    
-    print(result["pi_response"])
-    
-    # Save transcript
-    logger.save_transcript()
-
-asyncio.run(main())
-```
+Select from menu options for different interaction modes.
 
 ## Architecture
 
-### Core Components
-
 ```
 MiniLab/
-├── agents/          # Agent definitions and registry
-├── llm_backends/    # LLM provider interfaces (OpenAI, Anthropic)
-├── orchestrators/   # Meeting coordination and workflows
-├── storage/         # Project state, citations, knowledge graphs
-├── tools/           # Agent capabilities (search, Zotero, terminal, etc.)
-├── bibliography/    # Literature scanning and recommendations
-└── config/          # Agent configurations and personas
+├── agents/
+│   ├── base.py           # Agent class with agentic_execute() ReAct loop
+│   └── registry.py       # Loads agents from YAML config
+├── config/
+│   └── agents.yaml       # Agent personas and shared tool definitions
+├── orchestrators/
+│   ├── single_analysis.py  # 7-stage research workflow
+│   └── meetings.py         # PI-coordinated team meetings
+├── tools/
+│   ├── filesystem_dual.py  # ReadData (RO) + Sandbox (RW)
+│   ├── code_editor.py      # Incremental code building (10 actions)
+│   ├── web_search.py       # Web, PubMed, arXiv search
+│   ├── environment.py      # Package management with approval
+│   └── system_tools.py     # Terminal and Git access
+├── storage/
+│   ├── state_store.py      # Project persistence
+│   └── transcript.py       # Conversation logging
+└── llm_backends/
+    └── anthropic_backend.py  # Claude API integration
 ```
 
-### Key Abstractions
+## Core Concepts
 
-- **Agent**: Represents a team member with expertise, persona, and LLM backend
-- **Tool**: Reusable capability (web search, Zotero, terminal commands, etc.)
-- **ProjectState**: Persistent storage of citations, ideas, decisions, and graphs
-- **Meeting**: Orchestration pattern for agent collaboration
+### Agentic Execution
 
-### State Management
+Agents operate in a **ReAct-style loop** (`agentic_execute`):
 
-MiniLab stores data in multiple locations:
+1. **Think** about the task
+2. **Use a tool** (filesystem, code_editor, web_search, etc.)
+3. **Observe** the result
+4. **Continue** until task is complete or ask a colleague for help
 
-**Project Data** (`~/.minilab/projects/`):
-- **Citations**: Full bibliography with metadata and abstracts
-- **Knowledge Graph**: Concept links between papers and ideas
-- **Agent Notes**: Per-agent memory and observations
-- **Meeting History**: Summaries of discussions and decisions
-- **Ideas**: Tracked hypotheses with status and citations
+```
+# Tool call format (triple-backtick blocks)
+```tool
+{"tool": "filesystem", "action": "list", "params": {"path": "ReadData/"}}
+```
 
-**Workspace Directories**:
-- **Sandbox/**: Full read/write access for agents (code, analysis outputs, temp files)
-- **ReadData/**: Read-only data repository (protected datasets, reference files)
-- **Outputs/**: Single Analysis results (PDFs, figures, write-ups, citations)
-- **Transcripts/**: Automatic conversation logs with timestamps and token counts
+# Colleague consultation format
+```colleague
+{"colleague": "hinton", "question": "Can you write a script to load this data?"}
+```
 
-### Security Features
+# Completion signal
+```done
+{"result": "Analysis complete", "outputs": ["analysis.pdf"]}
+```
+```
 
-**Filesystem Security:**
-- Agents have full RW access to `Sandbox/` directory only
-- `ReadData/` directory is strictly read-only for agents
-- Path validation prevents directory traversal attacks (`../` escaping)
-- `copy_to_sandbox` action allows safe copying from ReadData to Sandbox
+### Shared Context
 
-**Environment Management:**
-- Package installation restricted to `minilab` micromamba environment only
-- Common data science packages (pandas, numpy, torch, etc.) auto-allowed
-- Non-common packages require user permission
-- System tool installation (brew, apt) always requires permission
+All agents receive comprehensive context including:
+- Project name and research question
+- Data file inventory
+- Current working plan
+- Execution plan
+- Previous results
 
-**Transcript Logging:**
-- All conversations automatically logged with timestamps
-- Format: `YYYY-MM-DD_HHMM_conversation-name.txt`
-- Includes user messages, agent responses, tool operations, token counts
-- Tool operations summarized (filenames shown, not full file contents)
-- Saved to `Transcripts/` directory after each session
+This prevents hallucination by ensuring agents know what actually exists.
 
-## Advanced Features
+### Tool Capabilities
 
-### Single Analysis Workflow
+All agents have access to:
 
-The Single Analysis mode implements a rigorous 6-stage research workflow with user interaction at key checkpoints:
+| Tool | Description |
+|------|-------------|
+| `filesystem` | Read/write files, list directories, create folders |
+| `code_editor` | Create, view, edit, run Python scripts incrementally |
+| `web_search` | Search the web for information |
+| `terminal` | Run shell commands |
+| `environment` | Check/install packages (with user approval) |
 
-**Stage 0: Confirm Files and Naming**
-- Bohr analyzes request and suggests project name
-- Discovers and lists all relevant data files
-- User confirms or corrects file list and project name
-- Creates project structure: `Sandbox/ProjectName/{scratch/, scripts/}`
+## Configuration
 
-**Stage 1: Build Project and Summarize Inputs**
-- Bohr reads file headers to understand data structure
-- Identifies sample/patient ID patterns and counts
-- Summarizes features and creates `data_manifest.txt`
-- User confirms data interpretation or provides clarifications
+### agents.yaml
 
-**Stage 2: Plan Full Analysis**
-- **2A: Initial Planning**
-  - Gould performs literature review and suggests hypotheses
-  - Farber evaluates feasibility and merit
-  - Bohr synthesizes into initial plan (iterates if concerns)
-- **2B: Theory Core Enhancement**
-  - Feynman, Shannon, and Greider suggest additional analyses and mechanisms
-  - Bohr synthesizes into detailed, near-actionable plan
-- **2C: Implementation Planning**
-  - Dayhoff outlines all scripts needed to execute analysis
-  - Creates `implementation_plan.md`
+All agents share the same tools via YAML anchors:
 
-**Stage 3: Execution**
-- Dayhoff shares plan with Hinton
-- Hinton generates all scripts in `scripts/` directory
-- Bayes performs code review (correctness, statistics, reproducibility)
-- Scripts revised until approved
-- Hinton runs all scripts to generate `ProjectName_figures.pdf` (4-6 panels)
+```yaml
+default_tools: &default_tools
+  - filesystem
+  - code_editor
+  - web_search
+  - terminal
+  - environment
 
-**Stage 4: Write-up**
-- Bohr reviews figures PDF for quality and formatting
-- Iterates with Hinton if fixes needed
-- Gould generates:
-  - `ProjectName_legends.pdf`: Journal-style figure legends (panels a-f)
-  - `ProjectName_summary.pdf`: Discussion (with ≥5 citations), Methods, Citations
+agents:
+  bohr:
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: *default_tools
+    persona: |
+      You are Bohr, the project lead...
+  
+  hinton:
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: *default_tools
+    persona: |
+      You are Hinton, the primary coder...
+```
 
-**Stage 5: Critical Review and Iteration**
-- Farber performs comprehensive critical review of all outputs
-- Evaluates validity of sources, conclusions, methods, presentation
-- User accepts or requests revisions
-- If revisions needed, workflow iterates from Stage 2 with updated plan
+### Environment Variables
 
-**Required Outputs** (in `Sandbox/ProjectName/`):
-- `ProjectName_figures.pdf`: 8.5×11" with 4-6 labeled panels (a-f)
-- `ProjectName_legends.pdf`: Detailed figure descriptions
-- `ProjectName_summary.pdf`: Discussion, Methods, Citations (≥5 with DOIs)
-- `scratch/data_manifest.txt`: Data inventory
-- `scratch/detailed_plan.md`: Full analysis plan
-- `scripts/*.py`: All analysis scripts
-
-**Token Budget**: 1,000,000 tokens (automatically tracked across all stages)
-
-**Usage:**
 ```bash
-python scripts/run_single_analysis.py
-# or
-python scripts/minilab.py  # Select option 1
+# Required
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional
+TAVILY_API_KEY=...       # Enhanced web search
+NCBI_EMAIL=...           # PubMed API
 ```
 
-### Citation Management
+## Data Directories
 
-The CitationTool enables agents to work with academic citations:
+| Directory | Access | Purpose |
+|-----------|--------|---------|
+| `ReadData/` | Read-only | Protected input data |
+| `Sandbox/` | Read-write | Project outputs, scripts, scratch files |
+| `Transcripts/` | Auto-generated | Conversation logs |
 
-**Manual Citation Entry** (API integration pending):
-```python
-from MiniLab.tools.citation import CitationTool
+## Security
 
-citation_tool = CitationTool()
+- **Filesystem sandboxing**: Agents cannot access files outside workspace
+- **ReadData protection**: Input data is read-only
+- **Package approval**: Non-common packages require user confirmation
+- **Path validation**: No directory traversal (`../`) allowed
 
-result = await citation_tool.execute(
-    action="create_manual",
-    doi="10.1038/nature12345",
-    title="Deep Learning in Cancer Genomics",
-    authors=["Smith, J.", "Doe, A."],
-    year=2024,
-    journal="Nature",
-    volume="600",
-    pages="123-130"
-)
+## Development
 
-# Get formatted citation with clickable DOI link
-print(result["formatted_apa"])
-print(result["doi_link"])  # https://doi.org/10.1038/nature12345
+### Running Tests
+
+```bash
+micromamba run -n minilab python -m pytest tests/
 ```
 
-**Format Bibliography:**
-```python
-result = await citation_tool.execute(
-    action="format_bibliography",
-    dois=["10.1038/nature12345", "10.1126/science.abc123"],
-    style="apa"  # or "mla", "chicago"
-)
+### Code Structure Verification
 
-print(result["bibliography"])
+```bash
+python -c "
+from MiniLab.orchestrators.single_analysis import run_single_analysis
+from MiniLab.agents.base import Agent
+print('agentic_execute:', hasattr(Agent, 'agentic_execute'))
+print('All systems operational')
+"
 ```
-
-**Supported Citation Styles**: APA, MLA, Chicago
-
-### Environment Management
-
-Agents can install Python packages with security controls:
-
-**Auto-Allowed Common Packages:**
-- Data science: pandas, numpy, scipy, matplotlib, seaborn, plotly
-- Machine learning: scikit-learn, torch, tensorflow, transformers
-- Bioinformatics: biopython, scanpy, anndata, pyensembl
-
-**Permission Required:**
-- Any non-common packages
-- System tools (brew, apt, etc.)
-
-**Example Usage (by agents):**
-```python
-# Common package - installed automatically
-result = await environment_tool.execute(
-    action="install_package",
-    packages=["pandas", "matplotlib"]
-)
-
-# Non-common package - user prompted
-result = await environment_tool.execute(
-    action="install_package",
-    packages=["obscure-package"]
-)
-# User sees: "Agent requests permission to install: obscure-package. Allow? (y/n)"
-```
-
-**Note**: All installations restricted to `minilab` micromamba environment only.
-
-## Usage Patterns
-
-### 1. Literature Review
-
-```python
-from MiniLab import load_agents
-from MiniLab.storage.state_store import StateStore
-
-# Create a project
-store = StateStore()
-project = store.create_project(
-    project_id="cancer_dl_review",
-    name="Deep Learning in Cancer Genomics",
-    description="Survey of deep learning methods for cancer prediction"
-)
-
-# Ask Carroll to find relevant papers
-agents = load_agents()
-carroll = agents["carroll"]
-response = await carroll.arespond(
-    "Find recent papers on graph neural networks for cancer genomics"
-)
-```
-
-### 2. Team Discussion
-
-```python
-from MiniLab.orchestrators.meetings import run_internal_team_meeting
-
-# Theory guild discusses a research idea
-history = await run_internal_team_meeting(
-    agents={k: agents[k] for k in ["feynman", "shannon", "greider"]},
-    agenda="Evaluate the identifiability of our proposed causal model",
-    project_context="We're modeling gene regulatory networks...",
-    rounds=3,
-)
-```
-
-### 3. Daily Literature Monitoring
-
-```python
-from MiniLab.bibliography import DailyDigest
-
-digest = DailyDigest(
-    state_store=store,
-    topics=["deep learning cancer", "single-cell genomics", "causal inference"]
-)
-
-recommendations = await digest.generate_daily_recommendations(
-    project_id="cancer_dl_review",
-    num_papers=3
-)
-
-print(digest.format_recommendation_email(recommendations))
-```
-
-## Integration with Zotero
-
-MiniLab can integrate with your Zotero library for literature management:
-
-1. Get your Zotero API credentials:
-   - Visit https://www.zotero.org/settings/keys
-   - Create a new private key with read/write access
-   - Note your User ID (shown on the page)
-
-2. Add to `.env`:
-   ```
-   ZOTERO_API_KEY=your_key_here
-   ZOTERO_USER_ID=your_user_id
-   ```
-
-3. Use Zotero tools:
-   ```python
-   from MiniLab.tools.zotero import ZoteroTool
-   
-   zotero = ZoteroTool()
-   result = await zotero.execute(action="search", query="deep learning")
-   ```
-
-## Future Development
-
-### Near-term (v0.2)
-- [ ] HPC integration for computational tasks
-- [ ] Enhanced tool calling with function definitions
-- [ ] Jupyter notebook interface
-- [ ] Automated experiment logging
-
-### Mid-term (v0.3)
-- [ ] RAG-based agent memory
-- [ ] Semantic paper embeddings for better recommendations
-- [ ] IRB-compliant data handling framework
-- [ ] Multi-project workspace management
-
-### Long-term
-- [ ] Local LLM support (Ollama, LM Studio)
-- [ ] Agent fine-tuning on domain knowledge
-- [ ] Collaborative editing of manuscripts
-- [ ] Integration with lab notebooks and ELNs
 
 ## Best Practices
 
-1. **Always Ground Claims**: Agents are instructed to cite sources for scientific claims
-2. **Version Control**: Use git to track all code and configuration changes
-3. **Project Scoping**: Create separate projects for distinct research questions
-4. **Regular Backups**: MiniLab stores data locally; back up `~/.minilab/` regularly
-5. **API Cost Management**: Monitor API usage; use cheaper models for routine tasks
+1. **Use git** for version control—no need for v2 suffixes in filenames
+2. **Trust the agents** to use their tools; don't micromanage in prompts
+3. **Check ReadData/** before running analysis to confirm data exists
+4. **Review transcripts** for debugging and understanding agent decisions
+5. **Keep prompts focused** on what you want, not how to do it
+
+## Limitations
+
+- Agents may occasionally hallucinate if not grounded with tool use
+- Long-running scripts may timeout (5 minute limit)
+- Vision capabilities (PDF viewing) are experimental
+- API costs can accumulate with complex analyses
 
 ## IRB and Data Security
 
-**IMPORTANT**: MiniLab currently sends data to third-party LLM APIs (OpenAI, Anthropic). 
+⚠️ **MiniLab sends data to Anthropic's API**
 
-⚠️ **Do NOT use with protected health information (PHI) or identifiable human subjects data** without:
+Do NOT use with protected health information (PHI) without:
 - IRB approval
-- Business Associate Agreements (BAAs) with LLM providers
+- BAA with Anthropic
 - De-identification pipelines
-- Secure, local LLM deployment
-
-For HPC integration with sensitive data, plan to deploy local models or use approved secure API gateways.
-
-## Citation
-
-If you use MiniLab in your research, please cite the foundational papers:
-
-```bibtex
-@article{zhou2025virtuallab,
-  title={VirtualLab: AI agents as virtual research assistants},
-  author={Zhou, et al.},
-  journal={Nature},
-  year={2025},
-  doi={10.1038/s41586-025-09442-9}
-}
-
-@article{cellvoyager2025,
-  title={CellVoyager: Interactive single-cell data analysis with AI agents},
-  author={Zhou, et al.},
-  journal={bioRxiv},
-  year={2025},
-  doi={10.1101/2025.06.03.657517v1}
-}
-```
-
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Submit a pull request
 
 ## License
 
-[Add your license here - e.g., MIT, Apache 2.0]
-
-## Support
-
-- **Issues**: https://github.com/yourusername/MiniLab/issues
-- **Discussions**: https://github.com/yourusername/MiniLab/discussions
+MIT License
 
 ## Acknowledgments
 
-MiniLab is inspired by and builds upon concepts from:
-- VirtualLab (Nature, 2025)
-- CellVoyager (bioRxiv, 2025)
-
-Developed for scientific research in deep learning, genomics, and computational biology.
+Inspired by:
+- [VirtualLab](https://www.nature.com/articles/s41586-025-09442-9) (Nature, 2025)
+- [CellVoyager](https://www.biorxiv.org/content/10.1101/2025.06.03.657517v1) (bioRxiv, 2025)
