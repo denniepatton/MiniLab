@@ -187,6 +187,101 @@ async def _agent_writes_file(agent: Agent, path: str, content: str) -> bool:
     return result.get("success", False)
 
 
+async def _agentic_delegate(
+    agent: Agent,
+    task: str,
+    shared_context: str = "",
+    max_iterations: int = 10,
+    max_tokens_per_step: int = 4000,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Delegate a task to an agent using TRUE agentic execution.
+    
+    Unlike arespond() which just generates text, this allows the agent to:
+    - Use their tools (filesystem, code_editor, web_search, etc.)
+    - Consult colleagues when they need help
+    - Make multiple attempts until the task is done
+    
+    Args:
+        agent: The Agent instance to delegate to
+        task: The specific task for this agent to complete
+        shared_context: Full project context ALL agents should know about
+        max_iterations: Max ReAct iterations
+        max_tokens_per_step: Token limit per agent step
+        verbose: Whether to print progress
+        
+    Returns:
+        Result dict with 'success', 'result', 'iterations', 'tool_calls', etc.
+    """
+    # Build full context for the agent
+    full_task = f"""SHARED CONTEXT (what all agents know):
+{shared_context}
+
+YOUR SPECIFIC TASK:
+{task}
+
+REMINDER: 
+- You have tools: filesystem, code_editor, terminal, web_search, environment
+- You can consult colleagues using ```colleague {{"colleague": "agent_id", "question": "..."}}```
+- When done, signal with ```done {{"result": "summary of what you did", "outputs": [...]}}```
+- USE your tools - don't just describe what you would do!
+"""
+    
+    result = await agent.agentic_execute(
+        task=full_task,
+        context=shared_context,
+        max_iterations=max_iterations,
+        max_tokens_per_step=max_tokens_per_step,
+        verbose=verbose,
+    )
+    
+    return result
+
+
+def _build_shared_context(
+    project_name: str,
+    research_question: str,
+    files: List[str],
+    manifest: str = "",
+    working_plan: str = "",
+    execution_plan: str = "",
+    stage: str = "",
+) -> str:
+    """
+    Build a comprehensive shared context string that ALL agents can see.
+    
+    This ensures every agent has the full picture - no more hallucinating
+    because they don't know what exists or what's been done.
+    """
+    context_parts = [
+        f"PROJECT: {project_name}",
+        f"RESEARCH QUESTION: {research_question}",
+        f"CURRENT STAGE: {stage}" if stage else "",
+        f"\nDATA FILES ({len(files)} files):",
+        "\n".join(f"  - {f}" for f in files[:20]),
+        f"  ... and {len(files) - 20} more" if len(files) > 20 else "",
+    ]
+    
+    if manifest:
+        context_parts.append(f"\nDATA MANIFEST:\n{manifest[:2000]}")
+    
+    if working_plan:
+        context_parts.append(f"\nWORKING PLAN:\n{working_plan[:3000]}")
+    
+    if execution_plan:
+        context_parts.append(f"\nEXECUTION PLAN:\n{execution_plan[:2000]}")
+    
+    context_parts.append(f"\nPROJECT PATHS:")
+    context_parts.append(f"  - Read data from: ReadData/")
+    context_parts.append(f"  - Write outputs to: Sandbox/{project_name}/")
+    context_parts.append(f"  - Scripts go in: Sandbox/{project_name}/scripts/")
+    context_parts.append(f"  - Scratch/intermediate: Sandbox/{project_name}/scratch/")
+    context_parts.append(f"  - Final outputs: Sandbox/{project_name}/outputs/")
+    
+    return "\n".join(part for part in context_parts if part)
+
+
 def _extract_project_name(text: str) -> Optional[str]:
     """Extract CamelCase project name from text."""
     patterns = [
@@ -516,59 +611,71 @@ Please address their concerns. Be specific about what I should look for or chang
     if logger:
         logger.log_stage_transition("Stage 1", "Project setup and data summary")
     
-    # Create project directory structure
+    # Bohr creates the project structure using their own tools
+    print("  Bohr setting up project structure (agentic mode)...")
+    
+    # Build shared context
+    shared_context = _build_shared_context(
+        project_name=project_name,
+        research_question=research_question,
+        files=files,
+        stage="Stage 1: Project Setup",
+    )
+    
+    bohr_setup_task = f"""Create the project directory structure for {project_name}.
+
+YOUR TASK:
+1. Use filesystem tool with action="mkdir" to create these directories:
+   - Sandbox/{project_name}/
+   - Sandbox/{project_name}/scratch/
+   - Sandbox/{project_name}/scripts/
+   - Sandbox/{project_name}/outputs/
+
+2. Read samples from the first 10 data files (use filesystem action="head")
+3. Create a data manifest summarizing the data and save it to Sandbox/{project_name}/scratch/data_manifest.txt
+
+The manifest should include:
+- Overall description of the data
+- Sample/patient ID format
+- Total samples (estimate)
+- Types of features
+- Any potential issues
+
+Signal completion with: ```done {{"result": "Project structure created", "outputs": ["data_manifest.txt"]}}```
+"""
+    
+    bohr_setup_result = await _agentic_delegate(
+        agent=bohr,
+        task=bohr_setup_task,
+        shared_context=shared_context,
+        max_iterations=10,
+        max_tokens_per_step=4000,
+        verbose=True,
+    )
+    tokens_used += TOKEN_PER_CALL * bohr_setup_result.get("iterations", 3)
+    
+    # Set paths for later use (may have been created by Bohr)
     project_path = Path.cwd() / "Sandbox" / project_name
-    project_path.mkdir(parents=True, exist_ok=True)
     scratch_dir = project_path / "scratch"
     scripts_dir = project_path / "scripts"
-    outputs_dir = project_path / "outputs"  # For final analysis outputs
+    outputs_dir = project_path / "outputs"
+    
+    # Ensure directories exist (fallback if Bohr didn't create them)
+    project_path.mkdir(parents=True, exist_ok=True)
     scratch_dir.mkdir(exist_ok=True)
     scripts_dir.mkdir(exist_ok=True)
     outputs_dir.mkdir(exist_ok=True)
     
-    print(f"  Created project structure:")
-    print(f"    Sandbox/{project_name}/")
-    print(f"    Sandbox/{project_name}/scratch/")
-    print(f"    Sandbox/{project_name}/scripts/")
-    print(f"    Sandbox/{project_name}/outputs/")
-    print(f"\n  Primary outputs to generate:")
-    print(f"    - {project_name}_figures.pdf")
-    print(f"    - {project_name}_legends.md")
-    print(f"    - {project_name}_summary.md\n")
-    
-    # 1A: Bohr reads and summarizes data files
-    _print_substage("1A: Reading and Summarizing Data Files")
-    
-    print("  Bohr analyzing data files...")
-    
-    # Read samples from each file
-    file_summaries = []
-    for f in files[:10]:  # Limit to first 10 files for speed
-        content = await _agent_reads_file(bohr, f, lines=30)
-        file_summaries.append(f"=== {f} ===\n{content[:1500]}")
-    
-    # Have Bohr create the manifest
-    manifest_prompt = f"""I'm creating a data manifest for project {project_name}.
-
-Here are samples from the data files:
-
-{chr(10).join(file_summaries)}
-
-Please create a data manifest that includes:
-1. Overall description: "These files contain..."
-2. Sample/patient ID format and naming convention
-3. Total unique samples/patients (estimate if needed)
-4. Types of features in the data with brief descriptions
-5. Any potential issues or ambiguities you notice
-
-Format this as a clear, structured text document."""
-
-    manifest_response = await bohr.arespond(manifest_prompt, max_tokens=4000)
-    tokens_used += TOKEN_PER_CALL
-    
-    # Save manifest
+    # Read manifest if it exists
     manifest_path = scratch_dir / "data_manifest.txt"
-    manifest = f"""# Data Manifest for {project_name}
+    if manifest_path.exists():
+        manifest_response = manifest_path.read_text()[:4000]
+        print(f"  ✓ Bohr created data manifest")
+    else:
+        manifest_response = bohr_setup_result.get("result", "Manifest not created")
+        print(f"  ⚠️ Manifest file not found, will create from output")
+        # Save the manifest content
+        manifest = f"""# Data Manifest for {project_name}
 # Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 # Files: {len(files)}
 
@@ -578,7 +685,17 @@ Format this as a clear, structured text document."""
 ## Data Summary:
 {manifest_response}
 """
-    await _agent_writes_file(bohr, f"Sandbox/{project_name}/scratch/data_manifest.txt", manifest)
+        await _agent_writes_file(bohr, f"Sandbox/{project_name}/scratch/data_manifest.txt", manifest)
+    
+    print(f"\n  Project structure:")
+    print(f"    Sandbox/{project_name}/")
+    print(f"    Sandbox/{project_name}/scratch/")
+    print(f"    Sandbox/{project_name}/scripts/")
+    print(f"    Sandbox/{project_name}/outputs/")
+    print(f"\n  Primary outputs to generate:")
+    print(f"    - {project_name}_figures.pdf")
+    print(f"    - {project_name}_legends.md")
+    print(f"    - {project_name}_summary.md\n")
     
     _show_agent("Bohr", manifest_response, truncate=2000)
     
@@ -589,24 +706,39 @@ Format this as a clear, structured text document."""
     )
     
     while not _user_approves(user_input):
-        # User has corrections
-        bohr_response = await bohr.arespond(f"""The user has feedback about my data interpretation.
+        # User has corrections - Bohr uses tools to update
+        bohr_update_task = f"""The user has feedback about the data interpretation.
 
 User feedback: "{user_input}"
 
 Current manifest:
 {manifest_response[:2000]}
 
-Please re-assess and update my understanding based on their feedback.""")
-        tokens_used += TOKEN_PER_CALL
+YOUR TASK:
+1. Read the current manifest using filesystem
+2. Update it based on user feedback
+3. Save the updated manifest
+
+Signal completion with: ```done {{"result": "Manifest updated", "outputs": ["data_manifest.txt"]}}```
+"""
         
-        _show_agent("Bohr", bohr_response)
+        bohr_update_result = await _agentic_delegate(
+            agent=bohr,
+            task=bohr_update_task,
+            shared_context=shared_context,
+            max_iterations=5,
+            max_tokens_per_step=3000,
+            verbose=True,
+        )
+        tokens_used += TOKEN_PER_CALL * bohr_update_result.get("iterations", 2)
         
-        # Update manifest
-        manifest = manifest.replace(manifest_response, bohr_response)
-        manifest_response = bohr_response
-        await _agent_writes_file(bohr, f"Sandbox/{project_name}/scratch/data_manifest.txt", manifest)
+        # Re-read updated manifest
+        if manifest_path.exists():
+            manifest_response = manifest_path.read_text()[:4000]
+        else:
+            manifest_response = bohr_update_result.get("result", manifest_response)
         
+        _show_agent("Bohr", manifest_response, truncate=2000)
         user_input = _get_user_input("Is this interpretation correct now?")
     
     print("\n  ✓ Data manifest confirmed and saved.\n")
@@ -656,29 +788,58 @@ I focus on scientific direction, integration, and project coordination.
 Be concise but comprehensive.""", max_tokens=2000)
         tokens_used += TOKEN_PER_CALL
         
-        # Gould: Literature review and citations
-        print("  Gould conducting literature review...")
-        gould_response = await gould.arespond(f"""Bohr has briefed me on this project:
+        # Gould: Literature review and citations using TRUE agentic execution
+        print("  Gould conducting literature review (agentic mode)...")
+        
+        # Build shared context for Gould
+        shared_context = _build_shared_context(
+            project_name=project_name,
+            research_question=research_question,
+            files=files,
+            manifest=manifest_response,
+            stage="Stage 2A: Literature Review",
+        )
+        
+        gould_task = f"""Bohr has briefed you on this project:
 
 {bohr_to_gould}
 
-YOUR ROLE: You are the LIBRARIAN. You use your web_search tool to find literature DIRECTLY.
-DO NOT write Python code, code blocks, or fake tool calls. Simply USE your tools.
+YOUR TASK: Conduct a literature review using your actual tools.
 
-Please:
-1. Use web_search to find relevant papers on this research topic
-2. Assemble a preliminary CITATIONS list with at least 5 key sources (with DOIs where possible)
-3. Summarize typical hypotheses, analyses, and questions in this domain
-4. Note any methodological considerations from the literature
+STEPS:
+1. Use your web_search tool to search for relevant papers (e.g., "PSMA biomarker prostate cancer")
+2. Use pubmed_search or arxiv_search for academic papers
+3. Compile a CITATIONS list with at least 5 real papers (include DOIs)
+4. Summarize the key findings from the literature
 
-CRITICAL INSTRUCTIONS:
-- DO NOT output Python code or code blocks
-- DO NOT write fake <function_calls> or tool invocations
-- DIRECTLY use your web_search tool to find papers, then summarize what you find
-- Your output should be TEXT with citations, not code
+OUTPUT FORMAT:
+## CITATIONS
+1. Author et al. (Year). Title. Journal. DOI: xxx
+2. ...
 
-Format with clear sections for CITATIONS and SUMMARY.""", max_tokens=4000)
-        tokens_used += TOKEN_PER_CALL
+## SUMMARY
+Key findings from the literature...
+
+## METHODOLOGICAL NOTES
+What methods are typically used...
+
+Signal completion with: ```done {{"result": "Literature review complete", "outputs": ["citations and summary"]}}```
+"""
+        
+        gould_result = await _agentic_delegate(
+            agent=gould,
+            task=gould_task,
+            shared_context=shared_context,
+            max_iterations=8,
+            max_tokens_per_step=4000,
+            verbose=True,
+        )
+        tokens_used += TOKEN_PER_CALL * gould_result.get("iterations", 3)
+        
+        gould_response = gould_result.get("result", "Literature review failed to complete")
+        if not gould_result.get("success"):
+            # Fallback - use whatever output we got
+            gould_response = gould_result.get("final_output", gould_response)
         
         _show_agent("Gould", gould_response, truncate=1500)
         
@@ -1073,114 +1234,137 @@ Also assess Nature-style compliance:
         print("  ⚠️ Bohr may have had difficulty viewing the figures")
     
     # -------------------------------------------------------------------------
-    # 5C: Gould creates legends based on ACTUAL figure content
+    # 5C: Gould creates legends based on ACTUAL figure content (agentic)
     # -------------------------------------------------------------------------
-    _print_substage("5C: Gould Creating Legends (Based on Actual Figures)")
+    _print_substage("5C: Gould Creating Legends (Agentic Mode)")
     
-    print("  Gould writing figure legends...")
+    print("  Gould writing figure legends using tools to view actual outputs...")
     
-    legends_response = await gould.arespond(f"""Create Nature-style figure legends for {project_name}.
+    # Build shared context for Gould
+    shared_context = _build_shared_context(
+        project_name=project_name,
+        research_question=research_question,
+        files=files,
+        manifest=manifest if 'manifest' in dir() else "",
+        working_plan=working_plan if 'working_plan' in dir() else "",
+        stage="Stage 5C: Writing Figure Legends",
+    )
+    
+    gould_legends_task = f"""Write Nature-style figure legends for {project_name}.
 
-BOHR'S DESCRIPTION OF ACTUAL FIGURES:
+BOHR'S DESCRIPTION OF FIGURES:
 {bohr_review}
 
 AVAILABLE RESULTS DATA:
-{results_data if results_data else "No results JSON available - use only what Bohr describes."}
+{results_data if results_data else "No results JSON found."}
 
-CRITICAL INSTRUCTIONS:
-1. Write legends ONLY for panels that Bohr actually described seeing
-2. Do NOT invent panels, statistics, or data that are not mentioned above
-3. If Bohr couldn't see something clearly, write "Panel [X]: Description pending clearer view"
-4. Every statistic you mention (p-values, sample sizes, effect sizes) MUST come from:
-   - Bohr's figure description, OR
-   - The results data above
-5. If no statistics are visible, do not make them up
+YOUR TASK:
+1. Use filesystem tool to list files in Sandbox/{project_name}/outputs/ to see what exists
+2. Use filesystem tool to read any .json or .csv files with results/statistics
+3. Write legends ONLY for panels that actually exist in the figures
 
-FORMAT for each panel:
-**Figure 1[letter].** [One-sentence description of what the panel shows.]
-[Details about the data, statistical test used, p-value if visible, sample size if known.]
-[Description of axes, colors, and symbols if applicable.]
+CRITICAL RULES:
+- Every statistic you mention MUST come from a file you read
+- If you can't find a statistic, say "statistics pending" not a made-up number
+- Write in Nature style: "Figure 1a. [Description] (n=X, P=Y by Z test)"
 
-Output ONLY the final legends document in clean markdown format.
-Do not include any "I will now..." or thinking text - just the legends.""", max_tokens=3000)
-    tokens_used += TOKEN_PER_CALL
+OUTPUT: Save the legends to Sandbox/{project_name}/{project_name}_legends.md using your filesystem tool.
+
+Signal completion with: ```done {{"result": "Legends written", "outputs": ["{project_name}_legends.md"]}}```
+"""
     
-    # Check for hallucination indicators
-    if any(phrase in legends_response.lower() for phrase in ["i will", "let me", "i'll start", "based on the plan"]):
-        print("  ⚠️ Warning: Response may contain thinking text, not just legends")
+    gould_legends_result = await _agentic_delegate(
+        agent=gould,
+        task=gould_legends_task,
+        shared_context=shared_context,
+        max_iterations=8,
+        max_tokens_per_step=4000,
+        verbose=True,
+    )
+    tokens_used += TOKEN_PER_CALL * gould_legends_result.get("iterations", 3)
     
-    # Save legends
-    await _agent_writes_file(gould, f"Sandbox/{project_name}/{project_name}_legends.md", legends_response)
+    legends_response = gould_legends_result.get("result", "Legends creation incomplete")
+    
+    # Verify the file was created
+    legends_path = project_path / f"{project_name}_legends.md"
+    if legends_path.exists():
+        print(f"  ✓ Legends file created: {legends_path.name}")
+        legends_response = legends_path.read_text()[:2000]
+    else:
+        print(f"  ⚠️ Legends file not found, using agent output")
+        # Save whatever we got
+        await _agent_writes_file(gould, f"Sandbox/{project_name}/{project_name}_legends.md", legends_response)
+    
     _show_agent("Gould", legends_response, truncate=1200)
     
     # -------------------------------------------------------------------------
-    # 5D: Gould creates summary based on ACTUAL results
+    # 5D: Gould creates summary based on ACTUAL results (agentic)
     # -------------------------------------------------------------------------
-    _print_substage("5D: Gould Creating Summary (Based on Actual Results)")
+    _print_substage("5D: Gould Creating Summary (Agentic Mode)")
     
-    print("  Gould writing summary document...")
+    print("  Gould writing summary document using tools to view results and search literature...")
     
-    summary_response = await gould.arespond(f"""Create a mini-paper summary for {project_name}.
+    gould_summary_task = f"""Write a mini-paper summary for {project_name}.
 
-BOHR'S DESCRIPTION OF ACTUAL FIGURES:
+BOHR'S DESCRIPTION OF FIGURES:
 {bohr_review}
-
-AVAILABLE RESULTS DATA:
-{results_data if results_data else "No results JSON file found."}
-
-LITERATURE CITATIONS (from earlier review):
-{citations_text[:1500] if citations_text else "Use web_search to find relevant citations if needed."}
 
 RESEARCH QUESTION:
 {research_question}
 
-CRITICAL INSTRUCTIONS:
-1. Write about ONLY what the figures actually show (per Bohr's description)
-2. Do NOT invent statistics, p-values, hazard ratios, or AUC values
-3. Every claim must have EITHER:
-   - A figure panel reference (e.g., "Figure 1b shows...")
-   - A citation with DOI
-4. If results are unclear, say "The analysis suggests..." not "We found statistically significant..."
-5. Do not include "I will now...", "Let me...", or any thinking text
+YOUR TASK:
+1. Use filesystem tool to list and read results files in Sandbox/{project_name}/outputs/
+2. Use web_search/pubmed_search to find citations for the methods and findings
+3. Write a mini-paper with ONLY claims backed by actual data or citations
 
-OUTPUT FORMAT (clean markdown, nothing else):
+CRITICAL RULES:
+- Every statistic MUST come from a file you read (not invented)
+- Every claim needs either a figure reference (Fig 1a) or a literature citation
+- If you can't find data for something, say "data pending" not a made-up number
 
+OUTPUT FORMAT:
 ## INTRODUCTION
-[Two paragraphs: Background on the field, then rationale and hypothesis for this analysis]
+[Background, rationale, hypothesis]
 
-## RESULTS
-[Describe what each figure panel actually shows. Reference specific panels (Fig 1a, 1b, etc.)]
-[Include only statistics that appear in the figures or results data]
+## RESULTS  
+[Reference specific figure panels: "Figure 1a shows..."]
+[Only include statistics you read from files]
 
 ## DISCUSSION
-[Interpret the results in context of the literature]
-[Compare to published findings, cite relevant papers with DOIs]
-[Acknowledge limitations]
+[Interpret in context of literature you found]
 
 ## METHODS
-[Describe the analysis pipeline, reference script names from Sandbox/{project_name}/scripts/]
-[Statistical tests used, software versions, data sources]
+[Scripts used, statistical tests, software]
 
 ## REFERENCES
-[Numbered list with DOIs where possible]
-[Every reference must be cited in the text above]
+[Numbered list with DOIs from your searches]
 
-Output ONLY the final document. No preamble, no "Here is...", just the markdown.""", max_tokens=6000)
-    tokens_used += TOKEN_PER_CALL
+Save to Sandbox/{project_name}/{project_name}_summary.md using your filesystem tool.
+
+Signal completion with: ```done {{"result": "Summary written", "outputs": ["{project_name}_summary.md"]}}```
+"""
     
-    # Check for hallucination indicators
-    hallucination_phrases = [
-        "hr = 0.", "auc = 0.", "p = 0.00", "p < 0.001",  # Made-up stats
-        "i will", "let me", "i'll create", "here is",  # Thinking text
-        "based on the plan", "as outlined",  # Plan references instead of actual data
-    ]
-    for phrase in hallucination_phrases:
-        if phrase in summary_response.lower():
-            print(f"  ⚠️ Warning: Possible hallucination detected ('{phrase}')")
-            break
+    gould_summary_result = await _agentic_delegate(
+        agent=gould,
+        task=gould_summary_task,
+        shared_context=shared_context,
+        max_iterations=10,
+        max_tokens_per_step=5000,
+        verbose=True,
+    )
+    tokens_used += TOKEN_PER_CALL * gould_summary_result.get("iterations", 4)
     
-    # Save summary
-    await _agent_writes_file(gould, f"Sandbox/{project_name}/{project_name}_summary.md", summary_response)
+    summary_response = gould_summary_result.get("result", "Summary creation incomplete")
+    
+    # Verify the file was created
+    summary_path = project_path / f"{project_name}_summary.md"
+    if summary_path.exists():
+        print(f"  ✓ Summary file created: {summary_path.name}")
+        summary_response = summary_path.read_text()[:3000]
+    else:
+        print(f"  ⚠️ Summary file not found, using agent output")
+        await _agent_writes_file(gould, f"Sandbox/{project_name}/{project_name}_summary.md", summary_response)
+    
     _show_agent("Gould", summary_response, truncate=1800)
     
     print(f"\n  ✓ Write-up complete:")

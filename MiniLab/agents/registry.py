@@ -73,38 +73,19 @@ def load_agents(
     for agent_id, a in agents_cfg.items():
         backend = _make_backend(a["backend"])
         
-        # Initialize tool instances - ALL agents get filesystem access
-        tool_instances = {}
+        # ALL agents get ALL core tools - they differ only in persona/role
+        # This enables TRUE agentic behavior where any agent can take action
         tool_names = a.get("tools", [])
         
-        # ALL agents get filesystem for reading data and writing to sandbox
-        tool_instances["filesystem"] = shared_filesystem
-        
-        # Add environment tool if requested
-        if "environment" in tool_names:
-            tool_instances["environment"] = shared_environment
-        
-        # Add citation tool if requested
-        if "citation" in tool_names or "citation_index" in tool_names:
-            tool_instances["citation"] = CitationTool()
-        
-        # Add terminal tool if requested
-        if "terminal" in tool_names:
-            tool_instances["terminal"] = TerminalTool()
-        
-        # Add git tool if requested
-        if "git" in tool_names:
-            tool_instances["git"] = GitTool()
-        
-        # Add web search tools if requested
-        if "web_search" in tool_names:
-            tool_instances["web_search"] = WebSearchTool()
-            tool_instances["pubmed_search"] = PubMedSearchTool()
-            tool_instances["arxiv_search"] = ArxivSearchTool()
-        
-        # Add code editor tool if requested (for Hinton and other code-writing agents)
-        if "code_editor" in tool_names:
-            tool_instances["code_editor"] = shared_code_editor
+        tool_instances = {
+            "filesystem": shared_filesystem,
+            "code_editor": shared_code_editor,
+            "terminal": TerminalTool(),
+            "environment": shared_environment,
+            "web_search": WebSearchTool(),
+            "pubmed_search": PubMedSearchTool(),
+            "arxiv_search": ArxivSearchTool(),
+        }
         
         agents[agent_id] = Agent(
             id=agent_id,
