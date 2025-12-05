@@ -13,6 +13,7 @@ from MiniLab.tools.environment import EnvironmentTool
 from MiniLab.tools.citation import CitationTool
 from MiniLab.tools.system_tools import TerminalTool, GitTool
 from MiniLab.tools.web_search import WebSearchTool, PubMedSearchTool, ArxivSearchTool
+from MiniLab.tools.code_editor import CodeEditorTool
 from .base import Agent
 
 
@@ -62,6 +63,12 @@ def load_agents(
         environment_name="minilab",
         permission_callback=permission_callback,
     )
+    
+    # Create code editor tool for agents that write code
+    shared_code_editor = CodeEditorTool(
+        workspace_root=WORKSPACE_ROOT,
+        sandbox_dir="Sandbox",
+    )
 
     for agent_id, a in agents_cfg.items():
         backend = _make_backend(a["backend"])
@@ -94,6 +101,10 @@ def load_agents(
             tool_instances["web_search"] = WebSearchTool()
             tool_instances["pubmed_search"] = PubMedSearchTool()
             tool_instances["arxiv_search"] = ArxivSearchTool()
+        
+        # Add code editor tool if requested (for Hinton and other code-writing agents)
+        if "code_editor" in tool_names:
+            tool_instances["code_editor"] = shared_code_editor
         
         agents[agent_id] = Agent(
             id=agent_id,

@@ -11,6 +11,8 @@ __all__ = [
     "WebSearchTool",
     "ArxivSearchTool", 
     "PubMedSearchTool",
+    "CodeEditorTool",
+    "TerminalTool",
 ]
 
 
@@ -41,3 +43,4 @@ from .filesystem_dual import DualModeFileSystemTool
 from .filesystem import FileSystemTool
 from .environment import EnvironmentTool
 from .web_search import WebSearchTool, ArxivSearchTool, PubMedSearchTool
+from .code_editor import CodeEditorTool, TerminalTool

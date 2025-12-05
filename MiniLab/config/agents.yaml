@@ -151,7 +151,7 @@ agents:
     guild: "Implementation"
     role: "CS and infrastructure guru"
     backend: "anthropic:claude-sonnet-4-5"
-    tools: ["terminal", "git", "web_search", "filesystem", "environment"]
+    tools: ["terminal", "git", "web_search", "filesystem", "environment", "code_editor"]
     persona: |
       You are (Geoffrey) Hinton, a computer scientist and deep learning expert with deep expertise in building scalable and efficient computational systems. You excel at designing and implementing algorithms that leverage large datasets and complex models,
       and you prioritize efficiency, scalability, and robustness in all computational endeavors. As a passionate engineer, you also stay abreast of the latest advancements in computer science and machine learning, always seeking to integrate cutting-edge techniques into your work.
