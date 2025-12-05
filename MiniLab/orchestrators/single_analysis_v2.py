@@ -30,6 +30,7 @@ PRIMARY OUTPUTS (required):
 
 from __future__ import annotations
 import asyncio
+import json
 import os
 import re
 import subprocess
@@ -40,6 +41,11 @@ from typing import Dict, Optional, Any, List, Tuple
 
 from MiniLab.agents.base import Agent
 from MiniLab.storage.transcript import TranscriptLogger
+from MiniLab.tools.documentation import (
+    get_documentation_for_code,
+    get_package_constraint_prompt,
+    AVAILABLE_PACKAGES,
+)
 
 
 # =============================================================================
@@ -49,6 +55,13 @@ from MiniLab.storage.transcript import TranscriptLogger
 TOKEN_PER_CALL = 2000  # Rough estimate for token tracking
 SCRIPT_TOKEN_LIMIT = 24000  # Max tokens for script generation
 FIX_TOKEN_LIMIT = 24000  # Max tokens for code fixes
+
+# Context window management (inspired by CellVoyager)
+# Explicit limits prevent token overflow and truncated responses
+MAX_ERROR_CHARS = 2000       # ~500 tokens for error messages
+MAX_CODE_CONTEXT = 4000      # ~1000 tokens for past code context
+MAX_DOC_CHARS = 3000         # ~750 tokens for API documentation
+MAX_OUTPUT_CHARS = 2000      # ~500 tokens for execution output
 
 # Primary output files
 PRIMARY_OUTPUTS = [
@@ -241,6 +254,85 @@ def validate_python_syntax(code: str) -> Tuple[bool, str]:
         return True, ""
     except SyntaxError as e:
         return False, f"Line {e.lineno}: {e.msg}"
+
+
+def dry_run_validation(code: str, workspace_root: Path) -> Tuple[bool, str]:
+    """
+    Perform a dry-run validation of Python code.
+    
+    This checks:
+    1. Syntax is valid
+    2. All imports succeed
+    3. Data file paths that are referenced exist
+    
+    Inspired by CellVoyager's pre-execution validation approach.
+    
+    Args:
+        code: Python source code
+        workspace_root: Root directory for path resolution
+        
+    Returns:
+        (is_valid, error_message)
+    """
+    import ast
+    
+    # Step 1: Syntax check
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return False, f"Syntax error at line {e.lineno}: {e.msg}"
+    
+    # Step 2: Extract imports and verify they're available
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name.split('.')[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imports.append(node.module.split('.')[0])
+    
+    # Check imports can be resolved
+    import importlib.util
+    missing_imports = []
+    for imp in set(imports):
+        if imp in ('__future__',):
+            continue
+        spec = importlib.util.find_spec(imp)
+        if spec is None:
+            missing_imports.append(imp)
+    
+    if missing_imports:
+        return False, f"Missing imports: {', '.join(missing_imports)}"
+    
+    # Step 3: Check for data file paths and verify they exist
+    # Look for common patterns like read_csv, read_excel, open(), Path()
+    file_patterns = [
+        r"pd\.read_csv\(['\"]([^'\"]+)['\"]",
+        r"pd\.read_excel\(['\"]([^'\"]+)['\"]",
+        r"pd\.read_parquet\(['\"]([^'\"]+)['\"]",
+        r"open\(['\"]([^'\"]+)['\"]",
+        r"Path\(['\"]([^'\"]+)['\"]",
+        r"np\.load\(['\"]([^'\"]+)['\"]",
+        r"np\.loadtxt\(['\"]([^'\"]+)['\"]",
+    ]
+    
+    missing_files = []
+    for pattern in file_patterns:
+        matches = re.findall(pattern, code)
+        for file_path in matches:
+            # Resolve relative to workspace root
+            full_path = workspace_root / file_path
+            if not full_path.exists() and not Path(file_path).exists():
+                # Only flag if it looks like an input file (not output)
+                if "ReadData" in file_path or file_path.endswith(('.csv', '.xlsx', '.parquet', '.npy')):
+                    if "Sandbox" not in file_path and "output" not in file_path.lower():
+                        missing_files.append(file_path)
+    
+    if missing_files:
+        return False, f"Input files not found: {', '.join(missing_files[:3])}"
+    
+    return True, ""
 
 
 def extract_code_from_response(response: str) -> str:
@@ -1219,22 +1311,30 @@ async def _generate_single_script(
     """
     Generate a single script with Hinton.
     
+    Includes package constraints and clear requirements to prevent
+    hallucinated imports and truncated code.
+    
     Returns: (script_code, tokens_used)
     """
     output_dir_name = "scratch" if is_exploratory else "outputs"
+    
+    # Get package constraint prompt
+    pkg_constraints = get_package_constraint_prompt()
     
     prompt = f"""Generate ONE complete Python script for the following task:
 
 {script_spec}
 
+{pkg_constraints}
+
 REQUIREMENTS:
 1. Read data from ReadData/
 2. Write outputs to Sandbox/{project_name}/{output_dir_name}/
-3. Use micromamba minilab environment (pandas, numpy, matplotlib, seaborn, scipy, sklearn, lifelines)
-4. Include proper error handling and print statements for progress
-5. Set random seed: np.random.seed(42) at the top
-6. Include `if __name__ == "__main__":` block
-7. Print "SCRIPT COMPLETE: [output files created]" at the end
+3. Include proper error handling and print statements for progress
+4. Set random seed: np.random.seed(42) at the top
+5. Include `if __name__ == "__main__":` block
+6. Print "SCRIPT COMPLETE: [output files created]" at the end
+7. Use absolute paths or paths relative to workspace root
 {"" if is_exploratory else f'''
 8. For figure scripts: Format for Nature style - white backgrounds, no gridlines, 10-12pt fonts
 9. Final figures PDF goes to: Sandbox/{project_name}/{project_name}_figures.pdf'''}
@@ -1251,6 +1351,57 @@ Provide ONLY the Python code in a ```python``` block, no explanation."""
     return code, tokens_used
 
 
+async def _critique_script(
+    bayes: Agent,
+    script_code: str,
+    script_name: str,
+    script_spec: str,
+    tokens_used: int,
+) -> tuple[str, bool, int]:
+    """
+    Have Bayes critique a script BEFORE execution (inspired by CellVoyager).
+    
+    This catches errors pre-execution instead of post-failure.
+    
+    Returns: (critique_text, needs_revision, tokens_used)
+    """
+    prompt = f"""Review this Python script for potential issues BEFORE it runs.
+
+SCRIPT NAME: {script_name}
+
+INTENDED PURPOSE:
+{script_spec[:1500]}
+
+CODE:
+```python
+{script_code[:MAX_CODE_CONTEXT]}
+```
+
+Check for:
+1. IMPORT ERRORS: Are all imports valid? Any misspelled package names?
+2. API ERRORS: Are function calls using correct parameters? (e.g., pd.read_csv, plt.savefig)
+3. PATH ERRORS: Do file paths look correct? (ReadData/ for input, Sandbox/ for output)
+4. LOGIC ERRORS: Any obvious bugs, missing variables, or incorrect operations?
+5. STATISTICAL ERRORS: Are statistical tests appropriate for the data types?
+
+Respond in this format:
+ISSUES FOUND: [yes/no]
+SEVERITY: [none/minor/major]
+DETAILS: [list specific issues if any, or "Script looks correct"]
+SUGGESTED FIXES: [specific fixes if needed]"""
+
+    response = await bayes.arespond(prompt, max_tokens=2000)
+    tokens_used += TOKEN_PER_CALL
+    
+    # Parse response to determine if revision needed
+    needs_revision = (
+        "ISSUES FOUND: yes" in response.lower() or 
+        "SEVERITY: major" in response.lower()
+    )
+    
+    return response, needs_revision, tokens_used
+
+
 async def _fix_script(
     hinton: Agent,
     script_code: str,
@@ -1262,27 +1413,44 @@ async def _fix_script(
     """
     Have Hinton fix a failing script.
     
+    Enhanced with dynamic documentation retrieval (inspired by CellVoyager)
+    to ground fixes in actual API signatures.
+    
     Returns: (fixed_code, tokens_used)
     """
+    # Get dynamic documentation for functions used in the code
+    api_docs = get_documentation_for_code(script_code, max_chars=MAX_DOC_CHARS)
+    
+    # Truncate error message to prevent token overflow
+    truncated_error = error_message[:MAX_ERROR_CHARS]
+    
+    # Get package constraints
+    pkg_constraints = get_package_constraint_prompt()
+    
     prompt = f"""Fix this Python script that failed to run.
 
 SCRIPT: {script_name}
 ATTEMPT: {attempt}/{MAX_FIX_ATTEMPTS_PER_SCRIPT}
 
 ERROR:
-{error_message[:3000]}
+{truncated_error}
 
 CURRENT CODE:
 ```python
 {script_code}
 ```
 
+{pkg_constraints}
+
+{api_docs if api_docs else ""}
+
 REQUIREMENTS:
 1. Fix the specific error shown
-2. Ensure all imports are at the top
+2. Ensure all imports are at the top and are from allowed packages only
 3. Ensure `if __name__ == "__main__":` block exists
 4. Print "SCRIPT COMPLETE: [outputs]" at the end
 5. Write the COMPLETE fixed script - do not truncate or abbreviate
+6. Use the API documentation above to ensure correct function parameters
 
 Provide ONLY the fixed Python code in a ```python``` block, no explanation."""
 
@@ -1301,6 +1469,8 @@ async def _run_script_with_retry(
 ) -> tuple[dict, int]:
     """
     Run a script with iterative fixing until it succeeds or max attempts reached.
+    
+    Includes dry-run validation before actual execution (inspired by CellVoyager).
     
     Returns: (result_dict, tokens_used)
     
@@ -1332,7 +1502,7 @@ async def _run_script_with_retry(
                     f.write(fixed_code)
                 script_code = fixed_code
         
-        # Validate syntax first
+        # Step 1: Validate syntax
         is_valid, syntax_error = validate_python_syntax(script_code)
         if not is_valid:
             print(f"        ✗ Syntax error: {syntax_error}")
@@ -1345,7 +1515,22 @@ async def _run_script_with_retry(
                     f.write(fixed_code)
             continue  # Try running again
         
-        # Run the script
+        # Step 2: Dry-run validation (check imports and file paths)
+        dry_run_ok, dry_run_error = dry_run_validation(script_code, workspace_root)
+        if not dry_run_ok:
+            print(f"        ✗ Dry-run failed: {dry_run_error}")
+            fixed_code, tokens_used = await _fix_script(
+                hinton, script_code, f"Pre-execution validation failed: {dry_run_error}",
+                script_name, attempt, tokens_used
+            )
+            if fixed_code:
+                with open(script_path, 'w') as f:
+                    f.write(fixed_code)
+            continue  # Try running again
+        
+        print(f"        ✓ Dry-run passed")
+        
+        # Step 3: Run the script
         try:
             result = subprocess.run(
                 ["micromamba", "run", "-n", "minilab", "python", str(script_path)],
@@ -1359,7 +1544,7 @@ async def _run_script_with_retry(
                 print(f"        ✓ SUCCESS")
                 return {
                     "success": True,
-                    "output": result.stdout[-1000:],
+                    "output": result.stdout[-MAX_OUTPUT_CHARS:],
                     "attempts": attempt,
                 }, tokens_used
             else:
@@ -1517,7 +1702,28 @@ List scripts in execution order.""", max_tokens=4000)
             all_succeeded = False
             continue
         
-        # Save script
+        # PRE-EXECUTION CRITIQUE (inspired by CellVoyager)
+        # Have Bayes review the code BEFORE running to catch obvious issues
+        print(f"      Pre-execution critique (Bayes)...")
+        critique, needs_revision, tokens_used = await _critique_script(
+            bayes, script_code, script_name, script_spec, tokens_used
+        )
+        
+        if needs_revision:
+            print(f"        ⚠️ Bayes found issues, requesting revision...")
+            # Have Hinton fix based on critique
+            fixed_code, tokens_used = await _fix_script(
+                hinton, script_code, 
+                f"Pre-execution code review found issues:\n{critique}",
+                script_name, 0, tokens_used
+            )
+            if fixed_code:
+                script_code = fixed_code
+                print(f"        ✓ Script revised based on critique")
+        else:
+            print(f"        ✓ Script looks correct")
+        
+        # Save script (possibly revised)
         script_path = scripts_dir / script_name
         with open(script_path, 'w') as f:
             f.write(script_code)
@@ -1537,6 +1743,30 @@ List scripts in execution order.""", max_tokens=4000)
             # (some scripts may be independent)
         else:
             print(f"      ✓ Succeeded on attempt {result['attempts']}")
+        
+        # EARLY VLM CHECK: If this script produced images, have Bayes check them immediately
+        if result["success"]:
+            output_dir = scratch_dir if is_exploratory else outputs_dir
+            new_pngs = [f for f in output_dir.glob("*.png") if script_name.replace('.py', '') in f.stem.lower() or f.stem.startswith(script_name[:2])]
+            if new_pngs:
+                print(f"      Bayes verifying {len(new_pngs)} output image(s)...")
+                img_check = await bayes.arespond_with_vision(
+                    user_message=f"""Quick check: Do these output images from {script_name} look correct?
+
+Check for:
+1. Are the axes labeled properly?
+2. Does the data look reasonable (not all zeros, not obviously wrong)?
+3. Are there any visual errors (missing legends, cut-off text)?
+
+Just respond: LOOKS GOOD or ISSUE: [brief description]""",
+                    image_paths=[str(f) for f in new_pngs[:3]],
+                    max_tokens=500,
+                )
+                tokens_used += TOKEN_PER_CALL
+                if "ISSUE" in img_check.upper():
+                    print(f"        ⚠️ Bayes: {img_check[:100]}")
+                else:
+                    print(f"        ✓ Images verified")
     
     # Summary
     successes = sum(1 for r in execution_results.values() if r.get("success"))
