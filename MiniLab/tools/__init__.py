@@ -13,6 +13,7 @@ __all__ = [
     "CodeEditorTool",
     "TerminalTool",
     "GitTool",
+    "UserInputTool",
 ]
 
 
@@ -44,3 +45,4 @@ from .environment import EnvironmentTool
 from .web_search import WebSearchTool, ArxivSearchTool, PubMedSearchTool
 from .code_editor import CodeEditorTool
 from .system_tools import TerminalTool, GitTool
+from .user_input import UserInputTool

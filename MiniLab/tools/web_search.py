@@ -9,62 +9,64 @@ from . import Tool
 
 class WebSearchTool(Tool):
     """
-    Web search tool using a search API (e.g., Tavily, SerpAPI, or similar).
-    For now, this is a placeholder that would need API credentials.
+    Web search tool that uses PubMed for scientific literature.
+    PubMed is free and doesn't require API keys.
     """
 
     def __init__(self, api_key: str | None = None):
         super().__init__(
             name="web_search",
-            description="Search the web for recent scientific papers, news, and information"
-        )
-        # Example: using Tavily API (you'd need to install tavily-python or use HTTP)
-        self.api_key = api_key or os.environ.get("TAVILY_API_KEY")
-        self.client = httpx.AsyncClient(timeout=30.0)
+            description="""Search for scientific papers and biomedical literature via PubMed.
+            
+Actions:
+- search: Search PubMed (requires: query, optional: max_results)
 
-    async def execute(self, query: str, max_results: int = 5, **kwargs) -> Dict[str, Any]:
+Example: {"tool": "web_search", "action": "search", "params": {"query": "Lu-177-PSMA prostate cancer biomarkers"}}
+
+Returns paper titles, authors, journals, publication dates, and DOIs."""
+        )
+        # PubMed is our primary (and only) backend - no API key needed
+        self._pubmed = PubMedSearchTool()
+
+    async def execute(self, action: str = "search", query: str = "", max_results: int = 10, **kwargs) -> Dict[str, Any]:
         """
-        Execute a web search.
+        Execute a literature search via PubMed.
         
         Args:
+            action: Action to perform (only "search" supported)
             query: Search query string
             max_results: Maximum number of results to return
             
         Returns:
-            Dict with 'results' list containing search results
+            Dict with 'success', 'results', etc.
         """
-        if not self.api_key:
-            # Fallback: return mock results or explain API needed
+        if action != "search":
             return {
-                "status": "error",
-                "message": "Web search requires TAVILY_API_KEY or similar API credentials",
-                "results": []
+                "success": False,
+                "error": f"Unknown action: {action}. Use 'search' with a 'query' parameter.",
             }
         
-        # Example Tavily API call (adjust based on actual API)
-        try:
-            response = await self.client.post(
-                "https://api.tavily.com/search",
-                json={
-                    "api_key": self.api_key,
-                    "query": query,
-                    "max_results": max_results,
-                    "search_depth": "advanced",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            
+        if not query:
             return {
-                "status": "success",
-                "query": query,
-                "results": data.get("results", []),
+                "success": False,
+                "error": "Missing required parameter: 'query'",
             }
-        except Exception as e:
+        
+        # Use PubMed for all searches
+        pubmed_result = await self._pubmed.execute(action="search", query=query, max_results=max_results)
+        
+        if pubmed_result.get("success"):
             return {
-                "status": "error",
-                "message": str(e),
-                "results": []
+                "success": True,
+                "source": "pubmed",
+                "query": query,
+                "results": pubmed_result.get("results", []),
+            }
+        else:
+            return {
+                "success": False,
+                "error": pubmed_result.get("error", "PubMed search failed"),
+                "source": "pubmed",
             }
 
 
@@ -77,22 +79,34 @@ class ArxivSearchTool(Tool):
     def __init__(self):
         super().__init__(
             name="arxiv_search",
-            description="Search arXiv for scientific papers"
+            description="""Search arXiv for scientific papers.
+
+Actions:
+- search: Search arXiv (requires: query, optional: max_results)
+
+Example: {"tool": "arxiv_search", "action": "search", "params": {"query": "prostate cancer machine learning"}}"""
         )
         self.client = httpx.AsyncClient(timeout=30.0)
         self.base_url = "http://export.arxiv.org/api/query"
 
-    async def execute(self, query: str, max_results: int = 10, **kwargs) -> Dict[str, Any]:
+    async def execute(self, action: str = "search", query: str = "", max_results: int = 10, **kwargs) -> Dict[str, Any]:
         """
         Search arXiv for papers.
         
         Args:
+            action: Action to perform (only "search" supported)
             query: Search query (can use arXiv query syntax)
             max_results: Maximum number of results
             
         Returns:
             Dict with paper results including titles, authors, abstracts, URLs
         """
+        if action != "search":
+            return {"success": False, "error": f"Unknown action: {action}. Use 'search'."}
+        
+        if not query:
+            return {"success": False, "error": "Missing required parameter: 'query'"}
+        
         try:
             params = {
                 "search_query": f"all:{query}",
@@ -105,20 +119,37 @@ class ArxivSearchTool(Tool):
             response = await self.client.get(self.base_url, params=params)
             response.raise_for_status()
             
-            # Parse XML response (simplified - would need proper XML parsing)
-            # For now, return raw response or use feedparser library
+            # Parse XML response
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(response.text)
+            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+            
+            results = []
+            for entry in root.findall('atom:entry', ns):
+                title = entry.find('atom:title', ns)
+                summary = entry.find('atom:summary', ns)
+                link = entry.find("atom:link[@title='pdf']", ns)
+                published = entry.find('atom:published', ns)
+                authors = entry.findall('atom:author/atom:name', ns)
+                
+                results.append({
+                    "title": title.text.strip() if title is not None else "",
+                    "summary": summary.text.strip()[:500] if summary is not None else "",
+                    "pdf_url": link.get('href') if link is not None else "",
+                    "published": published.text[:10] if published is not None else "",
+                    "authors": [a.text for a in authors[:5]],  # First 5 authors
+                })
+            
             return {
-                "status": "success",
+                "success": True,
                 "query": query,
-                "raw_response": response.text,
-                "note": "Full parsing requires feedparser library - install with: pip install feedparser"
+                "results": results,
             }
             
         except Exception as e:
             return {
-                "status": "error",
-                "message": str(e),
-                "results": []
+                "success": False,
+                "error": str(e),
             }
 
 
@@ -131,23 +162,35 @@ class PubMedSearchTool(Tool):
     def __init__(self, email: str | None = None):
         super().__init__(
             name="pubmed_search",
-            description="Search PubMed for biomedical and life sciences literature"
+            description="""Search PubMed for biomedical and life sciences literature.
+
+Actions:
+- search: Search PubMed (requires: query, optional: max_results)
+
+Example: {"tool": "pubmed_search", "action": "search", "params": {"query": "PSMA prostate cancer therapy"}}"""
         )
         self.email = email or os.environ.get("NCBI_EMAIL", "user@example.com")
         self.client = httpx.AsyncClient(timeout=30.0)
         self.base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
-    async def execute(self, query: str, max_results: int = 10, **kwargs) -> Dict[str, Any]:
+    async def execute(self, action: str = "search", query: str = "", max_results: int = 10, **kwargs) -> Dict[str, Any]:
         """
         Search PubMed for papers.
         
         Args:
+            action: Action to perform (only "search" supported)
             query: Search query
             max_results: Maximum number of results
             
         Returns:
             Dict with paper results
         """
+        if action != "search":
+            return {"success": False, "error": f"Unknown action: {action}. Use 'search'."}
+        
+        if not query:
+            return {"success": False, "error": "Missing required parameter: 'query'"}
+        
         try:
             # Step 1: Search for PMIDs
             search_params = {
@@ -169,7 +212,7 @@ class PubMedSearchTool(Tool):
             
             if not pmids:
                 return {
-                    "status": "success",
+                    "success": True,
                     "query": query,
                     "results": [],
                     "message": "No results found"
@@ -197,21 +240,20 @@ class PubMedSearchTool(Tool):
                     results.append({
                         "pmid": pmid,
                         "title": paper.get("title", ""),
-                        "authors": [a.get("name", "") for a in paper.get("authors", [])],
+                        "authors": [a.get("name", "") for a in paper.get("authors", [])][:5],
                         "journal": paper.get("fulljournalname", ""),
                         "pub_date": paper.get("pubdate", ""),
                         "doi": paper.get("elocationid", ""),
                     })
             
             return {
-                "status": "success",
+                "success": True,
                 "query": query,
                 "results": results
             }
             
         except Exception as e:
             return {
-                "status": "error",
-                "message": str(e),
-                "results": []
+                "success": False,
+                "error": str(e),
             }

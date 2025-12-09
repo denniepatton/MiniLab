@@ -14,6 +14,7 @@ from MiniLab.tools.citation import CitationTool
 from MiniLab.tools.system_tools import TerminalTool, GitTool
 from MiniLab.tools.web_search import WebSearchTool, PubMedSearchTool, ArxivSearchTool
 from MiniLab.tools.code_editor import CodeEditorTool
+from MiniLab.tools.user_input import UserInputTool
 from .base import Agent
 
 
@@ -69,6 +70,12 @@ def load_agents(
         workspace_root=WORKSPACE_ROOT,
         sandbox_dir="Sandbox",
     )
+    
+    # Create terminal tool with workspace root for path security
+    shared_terminal = TerminalTool(workspace_root=WORKSPACE_ROOT)
+    
+    # Create user input tool for agents to ask user directly
+    shared_user_input = UserInputTool()
 
     for agent_id, a in agents_cfg.items():
         backend = _make_backend(a["backend"])
@@ -80,8 +87,9 @@ def load_agents(
         tool_instances = {
             "filesystem": shared_filesystem,
             "code_editor": shared_code_editor,
-            "terminal": TerminalTool(),
+            "terminal": shared_terminal,
             "environment": shared_environment,
+            "user_input": shared_user_input,
             "web_search": WebSearchTool(),
             "pubmed_search": PubMedSearchTool(),
             "arxiv_search": ArxivSearchTool(),

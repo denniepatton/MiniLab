@@ -50,9 +50,19 @@ class CodeEditorTool(Tool):
         super().__init__(
             name="code_editor",
             description=(
-                "Incrementally build and edit Python scripts. Create files, append code, "
-                "replace specific lines, run scripts, and make surgical fixes. "
-                "More efficient than regenerating entire scripts."
+                "Build and edit Python scripts incrementally.\n\n"
+                "WORKFLOW: 1) CREATE the script, 2) RUN it, 3) FIX errors with edit/replace, 4) RUN again.\n\n"
+                "Actions:\n"
+                "  - create: {path, content} - Create script file with content (MUST DO FIRST!)\n"
+                "  - view: {path} - View file with line numbers\n"
+                "  - append: {path, code} - Add code to end of file\n"
+                "  - replace: {path, start_line, end_line, code} - Replace specific lines\n"
+                "  - run: {path} - Execute script, get stdout/stderr\n\n"
+                "IMPORTANT: Always CREATE a script before trying to RUN it!\n\n"
+                "Examples:\n"
+                "  Create: {\"tool\": \"code_editor\", \"action\": \"create\", \"params\": {\"path\": \"Sandbox/Project/scripts/analysis.py\", \"content\": \"import pandas as pd\\n...\"}}\n"
+                "  Run: {\"tool\": \"code_editor\", \"action\": \"run\", \"params\": {\"path\": \"Sandbox/Project/scripts/analysis.py\"}}\n"
+                "  Fix: {\"tool\": \"code_editor\", \"action\": \"replace\", \"params\": {\"path\": \"Sandbox/Project/scripts/analysis.py\", \"start_line\": 15, \"end_line\": 17, \"code\": \"# fixed code\"}}"
             )
         )
         self.workspace_root = Path(workspace_root).resolve()
@@ -108,22 +118,28 @@ class CodeEditorTool(Tool):
         Execute a code editing operation.
         
         Actions:
-        - create: Create new empty file or with skeleton (requires: path, optional: skeleton)
+        - create: Create new empty file or with skeleton (requires: path, optional: skeleton/code/content)
         - view: View file with line numbers (requires: path, optional: start_line, end_line)
-        - append: Append code to end of file (requires: path, code)
-        - insert: Insert code at line number (requires: path, line, code)
-        - replace: Replace line range with new code (requires: path, start_line, end_line, code)
+        - append: Append code to end of file (requires: path, code/content)
+        - insert: Insert code at line number (requires: path, line, code/content)
+        - replace: Replace line range with new code (requires: path, start_line, end_line, code/content)
         - delete_lines: Delete line range (requires: path, start_line, end_line)
         - replace_text: Find and replace specific text (requires: path, old_text, new_text)
         - check_syntax: Check Python syntax (requires: path)
         - run: Run the script and return output (requires: path, optional: timeout)
         - run_check: Quick import/syntax check without full run (requires: path)
         """
+        # Handle parameter aliases: 'content' -> 'code', 'skeleton' can be 'code'/'content'
+        if 'content' in kwargs and 'code' not in kwargs:
+            kwargs['code'] = kwargs.pop('content')
+        if 'skeleton' not in kwargs and 'code' in kwargs and action == 'create':
+            kwargs['skeleton'] = kwargs.get('code', '')
+        
         try:
             if action == "create":
                 return await self._create_file(
                     kwargs["path"], 
-                    kwargs.get("skeleton", "")
+                    kwargs.get("skeleton", kwargs.get("code", ""))
                 )
             elif action == "view":
                 return await self._view_file(
@@ -132,12 +148,20 @@ class CodeEditorTool(Tool):
                     kwargs.get("end_line"),
                 )
             elif action == "append":
-                return await self._append_code(kwargs["path"], kwargs["code"])
+                # Check for code parameter and give helpful error
+                code = kwargs.get("code")
+                if code is None:
+                    return {
+                        "success": False,
+                        "error": "Missing required parameter: 'code'. Use 'code' (not 'content') for the text to append.",
+                        "hint": "Example: {\"tool\": \"code_editor\", \"action\": \"append\", \"params\": {\"path\": \"...\", \"code\": \"...\"}}"
+                    }
+                return await self._append_code(kwargs["path"], code)
             elif action == "insert":
                 return await self._insert_code(
                     kwargs["path"], 
                     kwargs["line"], 
-                    kwargs["code"]
+                    kwargs.get("code", "")
                 )
             elif action == "replace":
                 return await self._replace_lines(
@@ -186,17 +210,35 @@ class CodeEditorTool(Tool):
     # FILE OPERATIONS
     # =========================================================================
     
-    async def _create_file(self, path: str, skeleton: str = "") -> Dict[str, Any]:
-        """Create a new file, optionally with skeleton code."""
+    async def _create_file(self, path: str, skeleton: str = "", overwrite: bool = False) -> Dict[str, Any]:
+        """Create a new file, optionally with skeleton code. If file exists, overwrites with new content."""
         full_path, error = self._resolve_path(path)
         if error:
             return {"success": False, "error": error}
         
+        # If file exists, overwrite it (more agent-friendly behavior)
         if full_path.exists():
-            return {
-                "success": False, 
-                "error": f"File already exists: {path}. Use 'view' to see it or 'replace' to modify."
-            }
+            if skeleton:
+                # Overwrite with new content
+                self._save_lines(full_path, [skeleton] if skeleton else [])
+                lines = self._get_lines(full_path)
+                return {
+                    "success": True,
+                    "action": "create (overwrite)",
+                    "path": str(path),
+                    "lines": len(lines),
+                    "message": f"Overwrote {path} with {len(lines)} lines. Use 'view' to see it.",
+                }
+            else:
+                # No new content provided, just acknowledge it exists
+                lines = self._get_lines(full_path)
+                return {
+                    "success": True,
+                    "action": "create (already exists)",
+                    "path": str(path),
+                    "lines": len(lines),
+                    "message": f"File already exists with {len(lines)} lines. Use 'view' to see it, 'append' to add code.",
+                }
         
         # Default Python skeleton if none provided
         if not skeleton and path.endswith('.py'):
@@ -266,13 +308,17 @@ if __name__ == "__main__":
         }
     
     async def _append_code(self, path: str, code: str) -> Dict[str, Any]:
-        """Append code to end of file."""
+        """Append code to end of file. Auto-creates file if it doesn't exist."""
         full_path, error = self._resolve_path(path)
         if error:
             return {"success": False, "error": error}
         
+        # Auto-create file if it doesn't exist
         if not full_path.exists():
-            return {"success": False, "error": f"File not found: {path}. Use 'create' first."}
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text("")
+            self._file_cache[str(full_path)] = []
+            print(f"      📄 Created new file: {path}")
         
         self._invalidate_cache(full_path)
         lines = self._get_lines(full_path)

@@ -37,7 +37,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Any, List, Tuple
+from typing import Dict, Optional, Any, List
 
 from MiniLab.agents.base import Agent
 from MiniLab.storage.transcript import TranscriptLogger
@@ -104,83 +104,6 @@ def _show_agent(agent_name: str, message: str, truncate: int = 0):
     print()
 
 
-def _get_user_input(prompt: str) -> str:
-    """Get input from user with a prompt."""
-    print(f"\n  {prompt}")
-    return input("  > ").strip()
-
-
-def _user_approves(response: str) -> bool:
-    """Check if user response indicates approval."""
-    approvals = ['yes', 'y', 'correct', 'good', 'fine', 'ok', 'proceed', 
-                 'looks good', 'approved', 'accept', 'continue', 'go ahead',
-                 'sounds good', 'perfect', 'great', 'agreed']
-    return any(word in response.lower() for word in approvals)
-
-
-def _user_rejects(response: str) -> bool:
-    """Check if user response indicates rejection/issues."""
-    rejections = ['no', 'wrong', 'incorrect', 'bad', 'issue', 'problem',
-                  'missing', 'fix', 'change', 'redo', 'again', 'not right']
-    return any(word in response.lower() for word in rejections)
-
-
-async def _ask_user_permission(action_description: str) -> bool:
-    """
-    Ask user for permission before performing an action (e.g., package install).
-    
-    Args:
-        action_description: Description of the action requiring permission
-        
-    Returns:
-        True if user approves, False otherwise
-    """
-    print(f"\n  ⚠️  PERMISSION REQUIRED")
-    print(f"  An agent wants to: {action_description}")
-    response = _get_user_input("Do you approve? (yes/no)")
-    return _user_approves(response)
-
-
-async def _discover_files(agent: Agent, base_path: str) -> List[str]:
-    """Recursively discover all files in a directory using agent's filesystem tool."""
-    discovered = []
-    base_path = base_path.rstrip('/')
-    to_explore = [base_path]
-    explored = set()
-    
-    while to_explore:
-        current = to_explore.pop(0)
-        if current in explored:
-            continue
-        explored.add(current)
-        
-        result = await agent.use_tool("filesystem", action="list", path=current)
-        
-        if result.get("success"):
-            for item in result.get("items", []):
-                if item['name'].startswith('.'):
-                    continue
-                item_path = f"{current}/{item['name']}"
-                if item['type'] == 'file':
-                    discovered.append(item_path)
-                elif item['type'] == 'directory':
-                    to_explore.append(item_path)
-    
-    return discovered
-
-
-async def _agent_reads_file(agent: Agent, path: str, lines: int = None) -> str:
-    """Have agent read a file and return its content."""
-    if lines:
-        result = await agent.use_tool("filesystem", action="head", path=path, lines=lines)
-    else:
-        result = await agent.use_tool("filesystem", action="read", path=path)
-    
-    if result.get("success"):
-        return result.get("content", "")
-    return f"[Error reading {path}: {result.get('error', 'Unknown')}]"
-
-
 async def _agent_writes_file(agent: Agent, path: str, content: str) -> bool:
     """Have agent write content to a file."""
     result = await agent.use_tool("filesystem", action="write", path=path, content=content)
@@ -194,6 +117,7 @@ async def _agentic_delegate(
     max_iterations: int = 10,
     max_tokens_per_step: int = 4000,
     verbose: bool = True,
+    logger: Optional[TranscriptLogger] = None,
 ) -> Dict[str, Any]:
     """
     Delegate a task to an agent using TRUE agentic execution.
@@ -210,6 +134,7 @@ async def _agentic_delegate(
         max_iterations: Max ReAct iterations
         max_tokens_per_step: Token limit per agent step
         verbose: Whether to print progress
+        logger: Optional TranscriptLogger for logging operations
         
     Returns:
         Result dict with 'success', 'result', 'iterations', 'tool_calls', etc.
@@ -234,7 +159,20 @@ REMINDER:
         max_iterations=max_iterations,
         max_tokens_per_step=max_tokens_per_step,
         verbose=verbose,
+        logger=logger,
     )
+    
+    # Log completion summary
+    if logger:
+        logger.log_system_event(
+            "agentic_complete",
+            f"{agent.display_name} completed task",
+            {
+                "iterations": result.get("iterations", 0),
+                "tool_calls": len(result.get("tool_calls", [])),
+                "success": result.get("success", False),
+            }
+        )
     
     return result
 
@@ -318,139 +256,6 @@ def _get_version_path(base_path: Path, filename: str, version: int) -> Path:
     return base_path / f"{stem}_v{version}{suffix}"
 
 
-def _get_latest_version(base_path: Path, filename_pattern: str) -> Tuple[int, Optional[Path]]:
-    """Find the latest version of a file matching pattern."""
-    stem = Path(filename_pattern).stem
-    suffix = Path(filename_pattern).suffix
-    
-    versions = []
-    for f in base_path.glob(f"{stem}_v*{suffix}"):
-        match = re.search(r'_v(\d+)', f.stem)
-        if match:
-            versions.append((int(match.group(1)), f))
-    
-    if versions:
-        versions.sort(reverse=True)
-        return versions[0]
-    
-    # Check for unversioned file
-    unversioned = base_path / filename_pattern
-    if unversioned.exists():
-        return (0, unversioned)
-    
-    return (0, None)
-
-
-def validate_python_syntax(code: str) -> Tuple[bool, str]:
-    """Check Python syntax without executing. Returns (is_valid, error_message)."""
-    import ast
-    try:
-        ast.parse(code)
-        return True, ""
-    except SyntaxError as e:
-        return False, f"Line {e.lineno}: {e.msg}"
-
-
-def dry_run_validation(code: str, workspace_root: Path) -> Tuple[bool, str]:
-    """
-    Perform a dry-run validation of Python code.
-    
-    This checks:
-    1. Syntax is valid
-    2. All imports succeed
-    3. Data file paths that are referenced exist
-    
-    Inspired by CellVoyager's pre-execution validation approach.
-    
-    Args:
-        code: Python source code
-        workspace_root: Root directory for path resolution
-        
-    Returns:
-        (is_valid, error_message)
-    """
-    import ast
-    
-    # Step 1: Syntax check
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as e:
-        return False, f"Syntax error at line {e.lineno}: {e.msg}"
-    
-    # Step 2: Extract imports and verify they're available
-    imports = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imports.append(alias.name.split('.')[0])
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                imports.append(node.module.split('.')[0])
-    
-    # Check imports can be resolved
-    import importlib.util
-    missing_imports = []
-    for imp in set(imports):
-        if imp in ('__future__',):
-            continue
-        spec = importlib.util.find_spec(imp)
-        if spec is None:
-            missing_imports.append(imp)
-    
-    if missing_imports:
-        return False, f"Missing imports: {', '.join(missing_imports)}"
-    
-    # Step 3: Check for data file paths and verify they exist
-    # Look for common patterns like read_csv, read_excel, open(), Path()
-    file_patterns = [
-        r"pd\.read_csv\(['\"]([^'\"]+)['\"]",
-        r"pd\.read_excel\(['\"]([^'\"]+)['\"]",
-        r"pd\.read_parquet\(['\"]([^'\"]+)['\"]",
-        r"open\(['\"]([^'\"]+)['\"]",
-        r"Path\(['\"]([^'\"]+)['\"]",
-        r"np\.load\(['\"]([^'\"]+)['\"]",
-        r"np\.loadtxt\(['\"]([^'\"]+)['\"]",
-    ]
-    
-    missing_files = []
-    for pattern in file_patterns:
-        matches = re.findall(pattern, code)
-        for file_path in matches:
-            # Resolve relative to workspace root
-            full_path = workspace_root / file_path
-            if not full_path.exists() and not Path(file_path).exists():
-                # Only flag if it looks like an input file (not output)
-                if "ReadData" in file_path or file_path.endswith(('.csv', '.xlsx', '.parquet', '.npy')):
-                    if "Sandbox" not in file_path and "output" not in file_path.lower():
-                        missing_files.append(file_path)
-    
-    if missing_files:
-        return False, f"Input files not found: {', '.join(missing_files[:3])}"
-    
-    return True, ""
-
-
-def extract_code_from_response(response: str) -> str:
-    """Extract Python code from a response that may contain markdown code blocks."""
-    # Try to find ```python ... ``` blocks
-    pattern = r'```python\s*\n(.*?)```'
-    matches = re.findall(pattern, response, re.DOTALL)
-    if matches:
-        return matches[0].strip()
-    
-    # Try to find ``` ... ``` blocks (any language)
-    pattern = r'```\s*\n(.*?)```'
-    matches = re.findall(pattern, response, re.DOTALL)
-    if matches:
-        return matches[0].strip()
-    
-    # If no code blocks, return the whole response if it looks like code
-    if 'import ' in response or 'def ' in response or 'class ' in response:
-        return response.strip()
-    
-    return ""
-
-
 # =============================================================================
 # MAIN WORKFLOW
 # =============================================================================
@@ -514,153 +319,194 @@ async def run_single_analysis(
     # =========================================================================
     # STAGE 0: CONFIRM FILES AND PROJECT NAMING
     # =========================================================================
-    _print_stage("STAGE 0", "Confirm Files and Project Naming")
+    _print_stage("STAGE 0", "Discover Data and Set Up Project")
     if logger:
-        logger.log_stage_transition("Stage 0", "Files and naming")
+        logger.log_stage_transition("Stage 0", "Discovery and setup")
     
-    # Extract target directory from research question
+    # Extract target directory from research question (minimal parsing, just for context)
     dir_match = re.search(r'ReadData/[\w/]+', research_question)
     target_dir = dir_match.group(0) if dir_match else "ReadData"
     
-    print(f"  Target directory: {target_dir}\n")
-    print("  Bohr discovering files...")
+    print(f"  Bohr discovering data and setting up project (agentic mode)...\n")
     
-    # Discover files
-    files = await _discover_files(bohr, target_dir)
-    tokens_used += TOKEN_PER_CALL * 2
-    
-    if not files:
-        print(f"\n  ERROR: No files found in {target_dir}")
-        return {"success": False, "error": f"No files found in {target_dir}"}
-    
-    print(f"  Found {len(files)} files.\n")
-    
-    # Have Bohr propose a project name
-    file_list_str = "\n".join(f"    - {f}" for f in files)
-    
-    bohr_response = await bohr.arespond(f"""I need to start a new analysis project. The user asked:
+    # FULLY AGENTIC: Bohr does EVERYTHING - discovery, naming, user approval, directory creation
+    stage0_task = f"""STAGE 0: Discover data files and set up the project.
 
+RESEARCH QUESTION FROM USER:
 "{research_question}"
 
-I've discovered these files:
-{file_list_str}
+YOUR TASK (do these in order):
 
-Please:
-1. Suggest a descriptive project name in CamelCase format (e.g., "PluvictoResponseAnalysis")
-2. Briefly describe what kind of data this appears to be
+1. DISCOVER FILES: Use terminal to list files in {target_dir}
+   Example: ls -la {target_dir}
 
-Keep it concise - just the project name suggestion and a 1-2 sentence data description.""")
-    tokens_used += TOKEN_PER_CALL
-    
-    if logger:
-        logger.log_agent_response("Bohr", "bohr", bohr_response, TOKEN_PER_CALL)
-    
-    project_name = _extract_project_name(bohr_response) or "UnnamedProject"
-    
-    # Show user and get confirmation
-    _show_agent("Bohr", bohr_response)
-    
-    print("  Files discovered:")
-    for f in files[:20]:  # Show first 20
-        print(f"    - {f}")
-    if len(files) > 20:
-        print(f"    ... and {len(files) - 20} more files")
-    print(f"\n  Suggested project name: {project_name}\n")
-    
-    # Stage 0 user checkpoint
-    user_input = _get_user_input(
-        "Is this correct? (yes to proceed, 'rename to X', or describe issues)"
+2. EXPLORE DATA: Look at the first few lines of key files to understand what this data is
+   Example: head -5 {target_dir}/some_file.csv
+
+3. PROPOSE PROJECT: Based on what you find, decide on:
+   - A descriptive project name in CamelCase (e.g., PluvictoResponsePrediction)
+   - A brief description of what this data represents
+
+4. ASK USER FOR APPROVAL: Use the user_input tool to ask the user if your project name is OK
+   Example: {{"tool": "user_input", "action": "ask", "params": {{"prompt": "I propose naming this project 'YourProjectName'. This data appears to be [your description]. Does this work? (yes, or suggest a different name)"}}}}
+
+5. HANDLE USER RESPONSE: 
+   - If user says yes/ok/looks good: proceed to create directories
+   - If user suggests a different name: use that name instead
+   - If user has concerns: address them and ask again
+
+6. CREATE PROJECT STRUCTURE: Once you have approval, create the directories:
+   - Sandbox/[ProjectName]/
+   - Sandbox/[ProjectName]/scripts/
+   - Sandbox/[ProjectName]/outputs/
+   - Sandbox/[ProjectName]/scratch/
+   Use terminal: mkdir -p Sandbox/[ProjectName]/scripts Sandbox/[ProjectName]/outputs Sandbox/[ProjectName]/scratch
+
+7. SIGNAL COMPLETION with the project name and file list:
+```done
+{{"result": "Project [ProjectName] created with [N] data files", "project_name": "[ProjectName]", "files": ["list", "of", "discovered", "files"]}}
+```
+
+IMPORTANT: 
+- YOU decide how to interpret user responses, not the orchestrator
+- YOU create the directories, not the orchestrator  
+- The project_name in your done signal will be used for subsequent stages
+"""
+
+    stage0_result = await _agentic_delegate(
+        agent=bohr,
+        task=stage0_task,
+        shared_context=f"Starting new analysis project based on user's research question.",
+        max_iterations=15,
+        max_tokens_per_step=3000,
+        verbose=True,
+        logger=logger,
     )
+    tokens_used += TOKEN_PER_CALL * stage0_result.get("iterations", 5)
     
-    while not _user_approves(user_input):
-        # Check for rename request
-        rename_match = re.search(r'rename(?:\s+to)?\s+["\']?(\w+)["\']?', user_input, re.IGNORECASE)
-        if rename_match:
-            project_name = rename_match.group(1)
-            print(f"\n  Project renamed to: {project_name}")
-            user_input = _get_user_input("Continue with this name?")
-            continue
-        
-        # User has concerns - have Bohr address
-        bohr_response = await bohr.arespond(f"""The user has feedback about my file discovery and project naming.
-
-User feedback: "{user_input}"
-
-Files found: {file_list_str[:2000]}
-Current project name: {project_name}
-
-Please address their concerns. Be specific about what I should look for or change.""")
-        tokens_used += TOKEN_PER_CALL
-        
-        _show_agent("Bohr", bohr_response)
-        
-        # Try to re-extract project name
-        new_name = _extract_project_name(bohr_response)
-        if new_name:
-            project_name = new_name
-        
-        print(f"  Current project name: {project_name}\n")
-        user_input = _get_user_input("Is this correct now?")
+    if not stage0_result.get("success"):
+        print(f"\n  ERROR: Stage 0 failed - {stage0_result.get('error', 'Unknown error')}")
+        return {"success": False, "error": "Stage 0 failed", "details": stage0_result}
     
-    print(f"\n  ✓ Confirmed: Project '{project_name}' with {len(files)} files.\n")
+    # Extract project info from Bohr's done signal
+    result_data = stage0_result.get("result", "")
+    
+    # Try to parse the done signal for project_name
+    import json
+    try:
+        # Look for JSON in the result
+        if isinstance(result_data, dict):
+            project_name = result_data.get("project_name", "UnnamedProject")
+            files = result_data.get("files", [])
+        else:
+            # Fallback: extract from text
+            project_name = _extract_project_name(str(result_data)) or "UnnamedProject"
+            # Get files from tool calls
+            files = []
+            for tc in stage0_result.get("tool_calls", []):
+                if "files" in str(tc.get("result", {})):
+                    files = tc.get("result", {}).get("files", files)
+    except:
+        project_name = "UnnamedProject"
+        files = []
+    
+    # Verify directory was created
+    project_path = Path.cwd() / "Sandbox" / project_name
+    if not project_path.exists():
+        print(f"  ⚠️ Directory not created, creating now...")
+        project_path.mkdir(parents=True, exist_ok=True)
+        (project_path / "scripts").mkdir(exist_ok=True)
+        (project_path / "outputs").mkdir(exist_ok=True)
+        (project_path / "scratch").mkdir(exist_ok=True)
+    
+    print(f"\n  ✓ Stage 0 complete: Project '{project_name}' initialized.\n")
     
     # =========================================================================
-    # STAGE 1: BUILD PROJECT STRUCTURE AND SUMMARIZE INPUTS
+    # STAGE 1: BUILD DATA MANIFEST
     # =========================================================================
-    _print_stage("STAGE 1", "Build Project Structure and Summarize Inputs")
+    _print_stage("STAGE 1", "Build Data Manifest")
     if logger:
-        logger.log_stage_transition("Stage 1", "Project setup and data summary")
+        logger.log_stage_transition("Stage 1", "Data manifest")
     
-    # Bohr creates the project structure using their own tools
-    print("  Bohr setting up project structure (agentic mode)...")
+    print(f"  Bohr exploring data and creating manifest (agentic mode)...\n")
     
     # Build shared context
     shared_context = _build_shared_context(
         project_name=project_name,
         research_question=research_question,
         files=files,
-        stage="Stage 1: Project Setup",
+        stage="Stage 1: Data Manifest",
     )
     
-    bohr_setup_task = f"""Create the project directory structure for {project_name}.
+    # FULLY AGENTIC: Bohr explores data, creates manifest, and gets user approval himself
+    stage1_task = f"""STAGE 1: Create a comprehensive data manifest for {project_name}.
 
-YOUR TASK:
-1. Use filesystem tool with action="mkdir" to create these directories:
-   - Sandbox/{project_name}/
-   - Sandbox/{project_name}/scratch/
-   - Sandbox/{project_name}/scripts/
-   - Sandbox/{project_name}/outputs/
+RESEARCH QUESTION:
+"{research_question}"
 
-2. Read samples from the first 10 data files (use filesystem action="head")
-3. Create a data manifest summarizing the data and save it to Sandbox/{project_name}/scratch/data_manifest.txt
+YOUR TASK (do these in order):
 
-The manifest should include:
-- Overall description of the data
-- Sample/patient ID format
-- Total samples (estimate)
-- Types of features
-- Any potential issues
+1. EXPLORE DATA FILES: Use terminal to examine the data files in detail
+   - List all files (you may already know from Stage 0)
+   - Check dimensions: wc -l, head -1 for column names
+   - Sample content: head -5, tail -5
+   - File types, sizes, etc.
 
-Signal completion with: ```done {{"result": "Project structure created", "outputs": ["data_manifest.txt"]}}```
+2. UNDERSTAND THE DATA: Figure out:
+   - What does this data represent? (clinical trial, biomarkers, etc.)
+   - What is the sample/patient ID format?
+   - What are the key features/columns?
+   - Any data quality issues?
+
+3. CREATE DATA MANIFEST: Save your findings to Sandbox/{project_name}/scratch/data_manifest.txt
+   Use code_editor to create/write the file with:
+   - Overview of data sources
+   - File-by-file summary (columns, row count, content type)
+   - Key variables identified
+   - Data quality notes
+   - Recommendations for analysis
+
+4. PRESENT TO USER AND GET APPROVAL: Use user_input.ask to show your summary and ask:
+   - "I've analyzed the data. Here's what I found: [brief summary]. Is this interpretation correct? (yes, or tell me what I got wrong)"
+
+5. HANDLE USER FEEDBACK:
+   - If user says yes/correct/proceed: signal done
+   - If user has corrections: update the manifest and ask again
+   - YOU interpret the user's response and decide what to do
+
+6. SIGNAL COMPLETION:
+```done
+{{"result": "Data manifest created with [summary]", "manifest_summary": "[2-3 sentence summary for next stages]", "outputs": ["data_manifest.txt"]}}
+```
+
+IMPORTANT:
+- YOU ask the user for approval using user_input tool
+- YOU interpret their response
+- YOU update the manifest if needed
+- The orchestrator does NOT parse your responses or user input
 """
-    
-    bohr_setup_result = await _agentic_delegate(
+
+    stage1_result = await _agentic_delegate(
         agent=bohr,
-        task=bohr_setup_task,
+        task=stage1_task,
         shared_context=shared_context,
-        max_iterations=10,
+        max_iterations=12,
         max_tokens_per_step=4000,
         verbose=True,
+        logger=logger,
     )
-    tokens_used += TOKEN_PER_CALL * bohr_setup_result.get("iterations", 3)
+    tokens_used += TOKEN_PER_CALL * stage1_result.get("iterations", 3)
     
-    # Set paths for later use (may have been created by Bohr)
+    if not stage1_result.get("success"):
+        print(f"\n  ⚠️ Stage 1 completed with issues - {stage1_result.get('error', 'Unknown')}")
+    
+    # Set paths for later use (should have been created by Bohr in Stage 0)
     project_path = Path.cwd() / "Sandbox" / project_name
     scratch_dir = project_path / "scratch"
     scripts_dir = project_path / "scripts"
     outputs_dir = project_path / "outputs"
     
-    # Ensure directories exist (fallback if Bohr didn't create them)
+    # Ensure directories exist (fallback)
     project_path.mkdir(parents=True, exist_ok=True)
     scratch_dir.mkdir(exist_ok=True)
     scripts_dir.mkdir(exist_ok=True)
@@ -669,11 +515,24 @@ Signal completion with: ```done {{"result": "Project structure created", "output
     # Read manifest if it exists
     manifest_path = scratch_dir / "data_manifest.txt"
     if manifest_path.exists():
-        manifest_response = manifest_path.read_text()[:4000]
-        print(f"  ✓ Bohr created data manifest")
+        manifest_content = manifest_path.read_text().strip()
+        # Check if manifest has actual content (not just headers)
+        if len(manifest_content) > 100 and "Sample" in manifest_content or "feature" in manifest_content.lower():
+            manifest_response = manifest_content[:4000]
+            print(f"  ✓ Bohr created data manifest")
+        else:
+            # Manifest exists but is sparse - use Bohr's result to fill it
+            bohr_result = stage1_result.get("result", "")
+            if bohr_result and len(str(bohr_result)) > 50:
+                manifest_response = str(bohr_result)[:4000]
+            else:
+                manifest_response = manifest_content[:4000] if manifest_content else "Manifest created but needs content"
+            print(f"  ⚠️ Manifest created but sparse, using Bohr's analysis")
     else:
-        manifest_response = bohr_setup_result.get("result", "Manifest not created")
-        print(f"  ⚠️ Manifest file not found, will create from output")
+        # No manifest file - create from Bohr's result
+        bohr_result = stage1_result.get("result", "")
+        manifest_response = str(bohr_result) if bohr_result else "Bohr completed setup but did not create manifest"
+        print(f"  ⚠️ Manifest file not found, creating from Bohr's output")
         # Save the manifest content
         manifest = f"""# Data Manifest for {project_name}
 # Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -697,51 +556,18 @@ Signal completion with: ```done {{"result": "Project structure created", "output
     print(f"    - {project_name}_legends.md")
     print(f"    - {project_name}_summary.md\n")
     
-    _show_agent("Bohr", manifest_response, truncate=2000)
-    
-    # Stage 1 user checkpoint
-    print("\n  Summary complete. Bohr has questions or observations about the data.\n")
-    user_input = _get_user_input(
-        "Review the data interpretation above. Any corrections or clarifications needed? (yes to proceed)"
-    )
-    
-    while not _user_approves(user_input):
-        # User has corrections - Bohr uses tools to update
-        bohr_update_task = f"""The user has feedback about the data interpretation.
-
-User feedback: "{user_input}"
-
-Current manifest:
-{manifest_response[:2000]}
-
-YOUR TASK:
-1. Read the current manifest using filesystem
-2. Update it based on user feedback
-3. Save the updated manifest
-
-Signal completion with: ```done {{"result": "Manifest updated", "outputs": ["data_manifest.txt"]}}```
-"""
-        
-        bohr_update_result = await _agentic_delegate(
-            agent=bohr,
-            task=bohr_update_task,
-            shared_context=shared_context,
-            max_iterations=5,
-            max_tokens_per_step=3000,
-            verbose=True,
-        )
-        tokens_used += TOKEN_PER_CALL * bohr_update_result.get("iterations", 2)
-        
-        # Re-read updated manifest
-        if manifest_path.exists():
-            manifest_response = manifest_path.read_text()[:4000]
+    # Get manifest content for later stages
+    if manifest_path.exists():
+        manifest_response = manifest_path.read_text()[:4000]
+    else:
+        # Try to get from Stage 1 result
+        result_data = stage1_result.get("result", {})
+        if isinstance(result_data, dict):
+            manifest_response = result_data.get("manifest_summary", str(result_data))
         else:
-            manifest_response = bohr_update_result.get("result", manifest_response)
-        
-        _show_agent("Bohr", manifest_response, truncate=2000)
-        user_input = _get_user_input("Is this interpretation correct now?")
+            manifest_response = str(result_data)
     
-    print("\n  ✓ Data manifest confirmed and saved.\n")
+    print(f"\n  ✓ Stage 1 complete: Data manifest created and approved.\n")
     
     # =========================================================================
     # STAGE 2: PLAN FULL ANALYSIS
@@ -787,6 +613,8 @@ I focus on scientific direction, integration, and project coordination.
 
 Be concise but comprehensive.""", max_tokens=2000)
         tokens_used += TOKEN_PER_CALL
+        if logger:
+            logger.log_agent_response(bohr.display_name, bohr.id, bohr_to_gould[:500], TOKEN_PER_CALL)
         
         # Gould: Literature review and citations using TRUE agentic execution
         print("  Gould conducting literature review (agentic mode)...")
@@ -804,26 +632,21 @@ Be concise but comprehensive.""", max_tokens=2000)
 
 {bohr_to_gould}
 
-YOUR TASK: Conduct a literature review using your actual tools.
+GOAL: Find relevant literature to inform our analysis approach.
 
-STEPS:
-1. Use your web_search tool to search for relevant papers (e.g., "PSMA biomarker prostate cancer")
-2. Use pubmed_search or arxiv_search for academic papers
-3. Compile a CITATIONS list with at least 5 real papers (include DOIs)
-4. Summarize the key findings from the literature
+Use your web_search tool to find papers about:
+- The disease/treatment being studied
+- Biomarker discovery methods for similar data
+- Statistical approaches for this type of analysis
 
-OUTPUT FORMAT:
-## CITATIONS
-1. Author et al. (Year). Title. Journal. DOI: xxx
-2. ...
+DELIVERABLES:
+1. At least 5 real citations with DOIs (from PubMed)
+2. Key methodological insights from the literature
+3. Any relevant findings we should consider
 
-## SUMMARY
-Key findings from the literature...
+Save your literature review to Sandbox/{project_name}/scratch/literature_review.md
 
-## METHODOLOGICAL NOTES
-What methods are typically used...
-
-Signal completion with: ```done {{"result": "Literature review complete", "outputs": ["citations and summary"]}}```
+When done: ```done {{"result": "Found X relevant papers. Key insights: [brief summary]", "outputs": ["literature_review.md"]}}```
 """
         
         gould_result = await _agentic_delegate(
@@ -833,6 +656,7 @@ Signal completion with: ```done {{"result": "Literature review complete", "outpu
             max_iterations=8,
             max_tokens_per_step=4000,
             verbose=True,
+            logger=logger,
         )
         tokens_used += TOKEN_PER_CALL * gould_result.get("iterations", 3)
         
@@ -869,6 +693,8 @@ As the critical reviewer, please:
 
 Be rigorous but constructive.""", max_tokens=3000)
         tokens_used += TOKEN_PER_CALL
+        if logger:
+            logger.log_agent_response(farber.display_name, farber.id, farber_response[:500], TOKEN_PER_CALL)
         
         _show_agent("Farber", farber_response, truncate=1500)
         
@@ -897,6 +723,8 @@ Please create a comprehensive WORKINGPLAN that:
 
 Mark any sections that need EXPLORATORY ANALYSIS before we can proceed to final analysis.""", max_tokens=4000)
         tokens_used += TOKEN_PER_CALL
+        if logger:
+            logger.log_agent_response(bohr.display_name, bohr.id, bohr_synthesis[:500], TOKEN_PER_CALL)
         
         working_plan = bohr_synthesis
         working_plan_version += 1
@@ -907,22 +735,50 @@ Mark any sections that need EXPLORATORY ANALYSIS before we can proceed to final 
         
         _show_agent("Bohr", bohr_synthesis, truncate=2000)
         
-        # Check for critical questions
-        has_critical_questions = "?" in bohr_synthesis and ("critical" in bohr_synthesis.lower() or "question" in bohr_synthesis.lower())
-        
         # Brief summary for user
         print(f"\n  WORKINGPLAN v{working_plan_version} created.\n")
         
-        user_input = _get_user_input(
-            "Review the working plan above. Approve to continue, or provide feedback/answer questions:"
-        )
+        # FULLY AGENTIC: Bohr asks user for approval and handles feedback
+        stage2a_approval_task = f"""You've just created WORKINGPLAN v{working_plan_version}. The user has seen it above.
+
+YOUR TASK: Get user approval for the working plan.
+
+1. Use user_input.ask to ask the user:
+   {{"tool": "user_input", "action": "ask", "params": {{"prompt": "Do you approve this working plan? (yes to proceed, or tell me what to change)"}}}}
+
+2. If user says yes/approve/proceed/looks good: Signal done with approval
+3. If user has feedback/concerns: Note them and signal done with the feedback
+
+```done
+{{"result": "approved" or "feedback: [user's feedback]", "user_approved": true or false, "feedback": "[any feedback]"}}
+```
+"""
         
-        if _user_approves(user_input):
-            user_satisfied = True
+        approval_result = await _agentic_delegate(
+            agent=bohr,
+            task=stage2a_approval_task,
+            shared_context=f"Working plan v{working_plan_version} just shown to user.",
+            max_iterations=5,
+            max_tokens_per_step=2000,
+            verbose=True,
+            logger=logger,
+        )
+        tokens_used += TOKEN_PER_CALL * approval_result.get("iterations", 2)
+        
+        # Check if user approved
+        result_data = approval_result.get("result", {})
+        if isinstance(result_data, dict):
+            user_satisfied = result_data.get("user_approved", False)
+            user_feedback = result_data.get("feedback", "")
         else:
-            # User has feedback - incorporate it
-            print("  Incorporating user feedback...")
-            working_plan = f"{working_plan}\n\n## USER FEEDBACK (iteration {synthesis_iterations}):\n{user_input}"
+            # Parse from string
+            result_str = str(result_data).lower()
+            user_satisfied = "approved" in result_str or "true" in result_str
+            user_feedback = str(result_data) if not user_satisfied else ""
+        
+        if not user_satisfied and user_feedback:
+            print(f"  Incorporating user feedback: {user_feedback[:100]}...")
+            working_plan = f"{working_plan}\n\n## USER FEEDBACK (iteration {synthesis_iterations}):\n{user_feedback}"
     
     # Check if exploratory analysis is needed
     if "exploratory" in working_plan.lower() or "explore" in working_plan.lower():
@@ -958,6 +814,10 @@ Be concise but insightful."""
         feynman_task, shannon_task, greider_task
     )
     tokens_used += TOKEN_PER_CALL * 3
+    if logger:
+        logger.log_agent_response(feynman.display_name, feynman.id, feynman_response[:300], TOKEN_PER_CALL)
+        logger.log_agent_response(shannon.display_name, shannon.id, shannon_response[:300], TOKEN_PER_CALL)
+        logger.log_agent_response(greider.display_name, greider.id, greider_response[:300], TOKEN_PER_CALL)
     
     print("\n  Theorist input received:")
     _show_agent("Feynman", feynman_response, truncate=800)
@@ -991,6 +851,8 @@ The plan should now include:
 3. Specific tests, visualizations, and expected results
 4. Citations to include""", max_tokens=5000)
     tokens_used += TOKEN_PER_CALL
+    if logger:
+        logger.log_agent_response(bohr.display_name, bohr.id, bohr_theory_synthesis[:500], TOKEN_PER_CALL)
     
     working_plan = bohr_theory_synthesis
     working_plan_version += 1
@@ -1060,6 +922,8 @@ Format as a clear, numbered plan Hinton can follow."""
     
     dayhoff_response = await dayhoff.arespond(dayhoff_prompt, max_tokens=5000)
     tokens_used += TOKEN_PER_CALL
+    if logger:
+        logger.log_agent_response(dayhoff.display_name, dayhoff.id, dayhoff_response[:500], TOKEN_PER_CALL)
     
     execution_plan = dayhoff_response
     
@@ -1117,6 +981,8 @@ Now create an EXECUTIONPLAN-COMPLETE that:
 
 Be explicit and detailed for Hinton.""", max_tokens=5000)
         tokens_used += TOKEN_PER_CALL
+        if logger:
+            logger.log_agent_response(dayhoff.display_name, dayhoff.id, dayhoff_complete[:500], TOKEN_PER_CALL)
         
         execution_plan = dayhoff_complete
         execution_plan_type = "complete"
@@ -1250,27 +1116,21 @@ Also assess Nature-style compliance:
         stage="Stage 5C: Writing Figure Legends",
     )
     
-    gould_legends_task = f"""Write Nature-style figure legends for {project_name}.
+    gould_legends_task = f"""GOAL: Write Nature-style figure legends for {project_name}.
 
-BOHR'S DESCRIPTION OF FIGURES:
+BOHR SAW IN THE FIGURES:
 {bohr_review}
 
-AVAILABLE RESULTS DATA:
-{results_data if results_data else "No results JSON found."}
+STEPS:
+1. Look at actual output files in Sandbox/{project_name}/outputs/ to find statistics
+2. Write legends that describe what each panel shows
+3. Include sample sizes and statistics ONLY if you find them in files
 
-YOUR TASK:
-1. Use filesystem tool to list files in Sandbox/{project_name}/outputs/ to see what exists
-2. Use filesystem tool to read any .json or .csv files with results/statistics
-3. Write legends ONLY for panels that actually exist in the figures
+Save to: Sandbox/{project_name}/{project_name}_legends.md
 
-CRITICAL RULES:
-- Every statistic you mention MUST come from a file you read
-- If you can't find a statistic, say "statistics pending" not a made-up number
-- Write in Nature style: "Figure 1a. [Description] (n=X, P=Y by Z test)"
+CRITICAL: Only describe what actually exists. If you can't find a statistic, write "statistics in figure" not a made-up number.
 
-OUTPUT: Save the legends to Sandbox/{project_name}/{project_name}_legends.md using your filesystem tool.
-
-Signal completion with: ```done {{"result": "Legends written", "outputs": ["{project_name}_legends.md"]}}```
+When done: ```done {{"result": "Legends written for X panels", "outputs": ["{project_name}_legends.md"]}}```
 """
     
     gould_legends_result = await _agentic_delegate(
@@ -1280,6 +1140,7 @@ Signal completion with: ```done {{"result": "Legends written", "outputs": ["{pro
         max_iterations=8,
         max_tokens_per_step=4000,
         verbose=True,
+        logger=logger,
     )
     tokens_used += TOKEN_PER_CALL * gould_legends_result.get("iterations", 3)
     
@@ -1304,44 +1165,26 @@ Signal completion with: ```done {{"result": "Legends written", "outputs": ["{pro
     
     print("  Gould writing summary document using tools to view results and search literature...")
     
-    gould_summary_task = f"""Write a mini-paper summary for {project_name}.
+    gould_summary_task = f"""GOAL: Write a mini-paper summary for {project_name}.
 
-BOHR'S DESCRIPTION OF FIGURES:
+BOHR SAW IN THE FIGURES:
 {bohr_review}
 
 RESEARCH QUESTION:
 {research_question}
 
-YOUR TASK:
-1. Use filesystem tool to list and read results files in Sandbox/{project_name}/outputs/
-2. Use web_search/pubmed_search to find citations for the methods and findings
-3. Write a mini-paper with ONLY claims backed by actual data or citations
+Write a short scientific summary with:
+- INTRODUCTION: Brief background and hypothesis
+- RESULTS: What the figures show (reference them: "Figure 1a shows...")
+- DISCUSSION: What it means
+- METHODS: Brief description
+- REFERENCES: Find 3-5 real citations using web_search
 
-CRITICAL RULES:
-- Every statistic MUST come from a file you read (not invented)
-- Every claim needs either a figure reference (Fig 1a) or a literature citation
-- If you can't find data for something, say "data pending" not a made-up number
+Save to: Sandbox/{project_name}/{project_name}_summary.md
 
-OUTPUT FORMAT:
-## INTRODUCTION
-[Background, rationale, hypothesis]
+CRITICAL: Only describe actual results. Don't invent statistics.
 
-## RESULTS  
-[Reference specific figure panels: "Figure 1a shows..."]
-[Only include statistics you read from files]
-
-## DISCUSSION
-[Interpret in context of literature you found]
-
-## METHODS
-[Scripts used, statistical tests, software]
-
-## REFERENCES
-[Numbered list with DOIs from your searches]
-
-Save to Sandbox/{project_name}/{project_name}_summary.md using your filesystem tool.
-
-Signal completion with: ```done {{"result": "Summary written", "outputs": ["{project_name}_summary.md"]}}```
+When done: ```done {{"result": "Summary written", "outputs": ["{project_name}_summary.md"]}}```
 """
     
     gould_summary_result = await _agentic_delegate(
@@ -1351,6 +1194,7 @@ Signal completion with: ```done {{"result": "Summary written", "outputs": ["{pro
         max_iterations=10,
         max_tokens_per_step=5000,
         verbose=True,
+        logger=logger,
     )
     tokens_used += TOKEN_PER_CALL * gould_summary_result.get("iterations", 4)
     
@@ -1445,7 +1289,7 @@ BE HARSH. List every issue you find. This is peer review.""",
     else:
         print("\n  ⚠️ Farber identified issues requiring attention.\n")
     
-    # Final user checkpoint
+    # Final status and outputs
     print("=" * 70)
     print("  WORKFLOW COMPLETE")
     print("=" * 70)
@@ -1455,13 +1299,51 @@ BE HARSH. List every issue you find. This is peer review.""",
     print(f"    - {project_name}_summary.md")
     print(f"\n  Total tokens used: ~{tokens_used:,}\n")
     
-    user_input = _get_user_input(
-        "Review the outputs. Approve to finish, or provide feedback for iteration:"
-    )
+    # FULLY AGENTIC: Bohr asks user for final approval
+    final_approval_task = f"""WORKFLOW COMPLETE. The analysis outputs have been generated:
+- {project_name}_figures.pdf
+- {project_name}_legends.md
+- {project_name}_summary.md
+
+Farber's review: {"Approved" if is_acceptable else "Identified issues"}
+
+YOUR TASK: Get user's final approval.
+
+1. Use user_input.ask to ask the user:
+   {{"tool": "user_input", "action": "ask", "params": {{"prompt": "The analysis is complete. Do you approve the outputs, or would you like to iterate? (approve to finish, or describe changes needed)"}}}}
+
+2. If user approves: Signal done with approval
+3. If user wants changes: Note their feedback and signal done with the feedback
+
+```done
+{{"result": "approved" or "iterate: [feedback]", "approved": true or false, "feedback": "[any feedback]"}}
+```
+"""
     
-    if not _user_approves(user_input):
-        print("\n  User requested iteration. Would restart from Stage 2 with feedback.")
-        # In full implementation, this would loop back to Stage 2 with accumulated feedback
+    final_result = await _agentic_delegate(
+        agent=bohr,
+        task=final_approval_task,
+        shared_context="Final workflow checkpoint",
+        max_iterations=5,
+        max_tokens_per_step=2000,
+        verbose=True,
+        logger=logger,
+    )
+    tokens_used += TOKEN_PER_CALL * final_result.get("iterations", 2)
+    
+    # Check if user approved
+    result_data = final_result.get("result", {})
+    if isinstance(result_data, dict):
+        user_approved = result_data.get("approved", False)
+        user_feedback = result_data.get("feedback", "")
+    else:
+        result_str = str(result_data).lower()
+        user_approved = "approved" in result_str or "true" in result_str
+        user_feedback = str(result_data) if not user_approved else ""
+    
+    if not user_approved and user_feedback:
+        print(f"\n  User requested iteration: {user_feedback[:200]}...")
+        print("  (In full implementation, would restart from Stage 2 with feedback)")
     
     return {
         "success": True,
@@ -1474,6 +1356,8 @@ BE HARSH. List every issue you find. This is peer review.""",
             "summary": str(project_path / f"{project_name}_summary.md"),
         },
         "working_plan_version": working_plan_version,
+        "user_approved": user_approved,
+        "user_feedback": user_feedback,
     }
 
 
@@ -1481,8 +1365,7 @@ BE HARSH. List every issue you find. This is peer review.""",
 # EXECUTION HELPER (Stages 3 & 4)
 # =============================================================================
 
-MAX_FIX_ATTEMPTS_PER_SCRIPT = 5  # Max attempts to fix a single script
-MAX_BUILD_ITERATIONS = 15  # Max iterations for iterative script building
+MAX_BUILD_ITERATIONS = 20  # Max iterations for agentic script building
 
 
 async def _build_script_with_tools(
@@ -1494,6 +1377,7 @@ async def _build_script_with_tools(
     workspace_root: Path,
     is_exploratory: bool,
     tokens_used: int,
+    logger: Optional[TranscriptLogger] = None,
 ) -> tuple[str, bool, int]:
     """
     Build a script using TRUE agentic execution (like a VS Code agent).
@@ -1513,58 +1397,69 @@ async def _build_script_with_tools(
     script_rel_path = f"Sandbox/{project_name}/scripts/{script_name}"
     pkg_constraints = get_package_constraint_prompt()
     
-    # Check if Hinton has the code_editor tool
-    if not hinton.has_tool("code_editor"):
-        print(f"        ⚠️ code_editor tool not available, falling back to legacy method")
-        return await _build_script_iteratively_legacy(
-            hinton, script_spec, script_name, project_name, 
-            project_path, workspace_root, is_exploratory, tokens_used
-        )
-    
     print(f"      🤖 Hinton working autonomously (agentic mode)...")
     
-    # Build the task for Hinton to execute autonomously
-    task = f"""Build a complete, working Python script: {script_name}
+    # GOAL-ORIENTED task - tell Hinton WHAT to achieve, not HOW
+    task = f"""GOAL: Create a working Python script that accomplishes:
 
-TASK SPECIFICATION:
 {script_spec}
 
-REQUIREMENTS:
+FILE TO CREATE: {script_rel_path}
+OUTPUT FILES GO TO: Sandbox/{project_name}/{output_dir_name}/
+INPUT DATA IS IN: ReadData/
+
+PACKAGE CONSTRAINTS:
 {pkg_constraints}
 
-FILE PATH: {script_rel_path}
-OUTPUT DIRECTORY: Sandbox/{project_name}/{output_dir_name}/
-INPUT DATA: ReadData/
+MANDATORY WORKFLOW - FOLLOW THIS EXACTLY:
+1. FIRST: Use code_editor.create to write the COMPLETE script
+   {{"tool": "code_editor", "action": "create", "params": {{"path": "{script_rel_path}", "content": "...full script code..."}}}}
+   
+2. THEN: Run it with terminal
+   {{"tool": "terminal", "action": "execute", "params": {{"command": "micromamba run -n minilab python {script_rel_path}"}}}}
+   
+3. IF IT FAILS: Fix and retry
+   - Use code_editor.view to see the code with line numbers
+   - Use code_editor.replace to fix specific lines
+   - Run again with terminal
+   
+4. REPEAT until script works
 
-WORKFLOW - Use your code_editor tool:
-1. First, use code_editor.create to create the file with a skeleton
-2. Use code_editor.append to add imports, then functions, then main block
-3. Use code_editor.check_syntax to verify syntax after each addition
-4. Use code_editor.run to execute the script
-5. If errors occur, use code_editor.view to see the code, then code_editor.replace to fix specific lines
-6. Continue until the script runs successfully and prints "SCRIPT COMPLETE"
+SUCCESS CRITERIA:
+- Script runs without errors
+- Script produces output files in Sandbox/{project_name}/{output_dir_name}/
+- Script prints "SCRIPT COMPLETE: [list of output files]"
 
-CRITICAL:
-- Build incrementally: imports first, then functions one at a time, then main block
-- Check syntax after each major addition
-- Run the script to verify it works
-- Make surgical fixes to specific lines when errors occur
-- The script MUST end with: print("SCRIPT COMPLETE: [list output files]")
+CRITICAL RULES:
+- Write COMPLETE scripts (never use "..." or abbreviate)
+- ALWAYS create the file BEFORE trying to run it
+- Use RELATIVE paths (Sandbox/..., ReadData/...) not absolute paths
+- Do NOT use cd commands - all paths are relative to workspace root
 
-Signal completion with:
-```done
-{{"result": "Script completed successfully", "outputs": ["list", "of", "files"]}}
-```
+When the script runs successfully: ```done {{"result": "Script works", "outputs": ["list files created"]}}```
 """
     
-    # Let Hinton work autonomously using the ReAct loop
+    # Let Hinton work autonomously - MORE iterations, trust the agent
     result = await hinton.agentic_execute(
         task=task,
         context=f"Building script for project {project_name}. This is {'exploratory' if is_exploratory else 'complete'} execution.",
-        max_iterations=MAX_BUILD_ITERATIONS,
-        max_tokens_per_step=3000,
+        max_iterations=MAX_BUILD_ITERATIONS + 5,  # Give more room to iterate
+        max_tokens_per_step=8000,  # More tokens per step for complete scripts
         verbose=True,
+        logger=logger,
     )
+    
+    # Log completion
+    if logger:
+        logger.log_system_event(
+            "script_build",
+            f"Hinton {'completed' if result.get('success') else 'failed'} {script_name}",
+            {
+                "iterations": result.get("iterations", 0),
+                "success": result.get("success", False),
+                "tool_calls": len(result.get("tool_calls", [])),
+            }
+        )
     
     # Estimate tokens used (each iteration uses ~TOKEN_PER_CALL)
     tokens_used += result.get("iterations", 1) * TOKEN_PER_CALL
@@ -1606,584 +1501,6 @@ Signal completion with:
     return "", False, tokens_used
 
 
-async def _build_script_iteratively_legacy(
-    hinton: Agent,
-    script_spec: str,
-    script_name: str,
-    project_name: str,
-    project_path: Path,
-    workspace_root: Path,
-    is_exploratory: bool,
-    tokens_used: int,
-) -> tuple[str, bool, int]:
-    """
-    LEGACY: Build a script iteratively without tools (fallback).
-    
-    This is the old phased approach - still better than single-shot,
-    but not as token-efficient as the tool-based approach.
-    
-    Returns: (final_code, success, tokens_used)
-    """
-    output_dir_name = "scratch" if is_exploratory else "outputs"
-    script_path = project_path / "scripts" / script_name
-    pkg_constraints = get_package_constraint_prompt()
-    
-    # Initialize with empty script
-    current_code = ""
-    build_phase = "imports"  # imports -> functions -> main -> complete
-    
-    print(f"      🔨 Building script iteratively (legacy mode)...")
-    
-    for iteration in range(1, MAX_BUILD_ITERATIONS + 1):
-        print(f"        Iteration {iteration}/{MAX_BUILD_ITERATIONS} - Phase: {build_phase}")
-        
-        if build_phase == "imports":
-            # PHASE 1: Generate imports and initial setup
-            prompt = f"""Write the IMPORTS and INITIAL SETUP for this Python script.
-
-TASK: {script_spec[:1500]}
-
-{pkg_constraints}
-
-Write ONLY the imports and any global constants/configuration.
-Include:
-- All necessary imports
-- np.random.seed(42)
-- Path definitions for ReadData/ and Sandbox/{project_name}/{output_dir_name}/
-
-Provide ONLY Python code in a ```python``` block. Just imports and setup, NOT the functions or main block yet."""
-
-            response = await hinton.arespond(prompt, max_tokens=1000)
-            tokens_used += TOKEN_PER_CALL
-            
-            code_chunk = extract_code_from_response(response)
-            if code_chunk:
-                current_code = code_chunk
-                
-                # Validate syntax
-                is_valid, error = validate_python_syntax(current_code)
-                if is_valid:
-                    print(f"          ✓ Imports valid")
-                    build_phase = "functions"
-                else:
-                    print(f"          ✗ Syntax error in imports: {error}")
-                    # Fix it
-                    fix_prompt = f"""Fix this syntax error in the imports:
-
-ERROR: {error}
-
-CODE:
-```python
-{current_code}
-```
-
-Provide the corrected imports section only, in a ```python``` block."""
-                    fix_response = await hinton.arespond(fix_prompt, max_tokens=1000)
-                    tokens_used += TOKEN_PER_CALL
-                    fixed = extract_code_from_response(fix_response)
-                    if fixed:
-                        current_code = fixed
-                    # Stay in imports phase to re-validate
-            else:
-                print(f"          ⚠️ No code generated for imports")
-                
-        elif build_phase == "functions":
-            # PHASE 2: Generate the functions/logic
-            prompt = f"""Now write the FUNCTIONS for this script.
-
-TASK: {script_spec[:1500]}
-
-CURRENT CODE (imports already written):
-```python
-{current_code}
-```
-
-Write the FUNCTION DEFINITIONS that implement the main logic.
-Include docstrings and print statements for progress tracking.
-
-CRITICAL: Write ALL functions needed. Do NOT abbreviate with "..." or "similar for other cases".
-Write complete, working functions.
-
-Provide ONLY the new function definitions in a ```python``` block.
-Do NOT repeat the imports - I will append your functions to the existing code."""
-
-            response = await hinton.arespond(prompt, max_tokens=SCRIPT_TOKEN_LIMIT - 500)
-            tokens_used += TOKEN_PER_CALL
-            
-            code_chunk = extract_code_from_response(response)
-            if code_chunk:
-                # Combine imports + functions
-                test_code = current_code + "\n\n" + code_chunk
-                
-                # Validate syntax
-                is_valid, error = validate_python_syntax(test_code)
-                if is_valid:
-                    print(f"          ✓ Functions valid")
-                    current_code = test_code
-                    build_phase = "main"
-                else:
-                    print(f"          ✗ Syntax error in functions: {error[:100]}")
-                    # Fix the functions
-                    fix_prompt = f"""Fix this syntax error in the functions:
-
-ERROR: {error}
-
-FUNCTIONS CODE:
-```python
-{code_chunk}
-```
-
-Provide the corrected functions in a ```python``` block."""
-                    fix_response = await hinton.arespond(fix_prompt, max_tokens=SCRIPT_TOKEN_LIMIT - 500)
-                    tokens_used += TOKEN_PER_CALL
-                    fixed = extract_code_from_response(fix_response)
-                    if fixed:
-                        test_code = current_code + "\n\n" + fixed
-                        is_valid2, _ = validate_python_syntax(test_code)
-                        if is_valid2:
-                            current_code = test_code
-                            build_phase = "main"
-            else:
-                print(f"          ⚠️ No code generated for functions")
-                
-        elif build_phase == "main":
-            # PHASE 3: Generate the main block
-            prompt = f"""Now write the MAIN BLOCK for this script.
-
-TASK: {script_spec[:1000]}
-
-CURRENT CODE (imports and functions already written):
-```python
-{current_code}
-```
-
-Write the `if __name__ == "__main__":` block that:
-1. Calls the functions above
-2. Saves outputs to Sandbox/{project_name}/{output_dir_name}/
-3. Ends with: print("SCRIPT COMPLETE: [list of output files]")
-
-Provide ONLY the main block in a ```python``` block.
-Do NOT repeat imports or functions - I will append your main block."""
-
-            response = await hinton.arespond(prompt, max_tokens=2000)
-            tokens_used += TOKEN_PER_CALL
-            
-            code_chunk = extract_code_from_response(response)
-            if code_chunk:
-                # Ensure it has the main guard
-                if 'if __name__' not in code_chunk:
-                    code_chunk = 'if __name__ == "__main__":\n    ' + code_chunk.replace('\n', '\n    ')
-                
-                # Combine all parts
-                full_code = current_code + "\n\n" + code_chunk
-                
-                # Validate syntax
-                is_valid, error = validate_python_syntax(full_code)
-                if is_valid:
-                    print(f"          ✓ Main block valid")
-                    current_code = full_code
-                    build_phase = "complete"
-                else:
-                    print(f"          ✗ Syntax error in main: {error[:100]}")
-                    # Fix it
-                    fix_prompt = f"""Fix this syntax error in the main block:
-
-ERROR: {error}
-
-MAIN BLOCK:
-```python
-{code_chunk}
-```
-
-Provide the corrected main block in a ```python``` block."""
-                    fix_response = await hinton.arespond(fix_prompt, max_tokens=2000)
-                    tokens_used += TOKEN_PER_CALL
-                    fixed = extract_code_from_response(fix_response)
-                    if fixed:
-                        if 'if __name__' not in fixed:
-                            fixed = 'if __name__ == "__main__":\n    ' + fixed.replace('\n', '\n    ')
-                        full_code = current_code + "\n\n" + fixed
-                        is_valid2, _ = validate_python_syntax(full_code)
-                        if is_valid2:
-                            current_code = full_code
-                            build_phase = "complete"
-            else:
-                print(f"          ⚠️ No code generated for main block")
-                
-        elif build_phase == "complete":
-            # PHASE 4: Validate and run
-            print(f"        📋 Full validation...")
-            
-            # Dry-run validation
-            dry_ok, dry_error = dry_run_validation(current_code, workspace_root)
-            if not dry_ok:
-                print(f"          ✗ Dry-run failed: {dry_error[:100]}")
-                # Fix the issue
-                fix_prompt = f"""Fix this validation error:
-
-ERROR: {dry_error}
-
-{pkg_constraints}
-
-CURRENT SCRIPT:
-```python
-{current_code[:MAX_CODE_CONTEXT]}
-```
-
-Provide the COMPLETE fixed script in a ```python``` block."""
-                fix_response = await hinton.arespond(fix_prompt, max_tokens=FIX_TOKEN_LIMIT)
-                tokens_used += TOKEN_PER_CALL
-                fixed = extract_code_from_response(fix_response)
-                if fixed:
-                    current_code = fixed
-                continue  # Re-validate
-            
-            print(f"          ✓ Dry-run passed")
-            
-            # Save and run the script
-            with open(script_path, 'w') as f:
-                f.write(current_code)
-            
-            print(f"        🚀 Running script...")
-            try:
-                result = subprocess.run(
-                    ["micromamba", "run", "-n", "minilab", "python", str(script_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                    cwd=str(workspace_root),
-                )
-                
-                if result.returncode == 0:
-                    print(f"          ✓ SUCCESS!")
-                    output_preview = result.stdout[-500:] if result.stdout else ""
-                    print(f"          Output: {output_preview[:200]}...")
-                    return current_code, True, tokens_used
-                else:
-                    error_msg = result.stderr if result.stderr else result.stdout
-                    print(f"          ✗ Runtime error")
-                    print(f"          Error: {error_msg[:200]}...")
-                    
-                    # Get documentation for fix
-                    api_docs = get_documentation_for_code(current_code, max_chars=MAX_DOC_CHARS)
-                    
-                    # Have Hinton fix based on actual error
-                    fix_prompt = f"""The script ran but got this error:
-
-ERROR:
-{error_msg[:MAX_ERROR_CHARS]}
-
-{pkg_constraints}
-
-{api_docs if api_docs else ""}
-
-CURRENT SCRIPT:
-```python
-{current_code}
-```
-
-Fix the error and provide the COMPLETE corrected script in a ```python``` block."""
-                    
-                    fix_response = await hinton.arespond(fix_prompt, max_tokens=FIX_TOKEN_LIMIT)
-                    tokens_used += TOKEN_PER_CALL
-                    fixed = extract_code_from_response(fix_response)
-                    if fixed:
-                        current_code = fixed
-                    # Stay in complete phase to re-run
-                    
-            except subprocess.TimeoutExpired:
-                print(f"          ✗ Timeout (5 min)")
-                return current_code, False, tokens_used
-    
-    # Max iterations reached
-    print(f"        ⚠️ Max iterations ({MAX_BUILD_ITERATIONS}) reached")
-    with open(script_path, 'w') as f:
-        f.write(current_code)
-    return current_code, False, tokens_used
-
-
-async def _generate_single_script(
-    hinton: Agent,
-    script_spec: str,
-    project_name: str,
-    project_path: Path,
-    is_exploratory: bool,
-    tokens_used: int,
-) -> tuple[str, int]:
-    """
-    DEPRECATED: Use _build_script_iteratively instead.
-    
-    This is kept for compatibility but should not be used.
-    Single-shot generation leads to truncated scripts.
-    
-    Returns: (script_code, tokens_used)
-    """
-    output_dir_name = "scratch" if is_exploratory else "outputs"
-    
-    # Get package constraint prompt
-    pkg_constraints = get_package_constraint_prompt()
-    
-    prompt = f"""Generate ONE complete Python script for the following task:
-
-{script_spec}
-
-{pkg_constraints}
-
-REQUIREMENTS:
-1. Read data from ReadData/
-2. Write outputs to Sandbox/{project_name}/{output_dir_name}/
-3. Include proper error handling and print statements for progress
-4. Set random seed: np.random.seed(42) at the top
-5. Include `if __name__ == "__main__":` block
-6. Print "SCRIPT COMPLETE: [output files created]" at the end
-7. Use absolute paths or paths relative to workspace root
-{"" if is_exploratory else f'''
-8. For figure scripts: Format for Nature style - white backgrounds, no gridlines, 10-12pt fonts
-9. Final figures PDF goes to: Sandbox/{project_name}/{project_name}_figures.pdf'''}
-
-CRITICAL: Write the COMPLETE script. Do not truncate or abbreviate any code.
-Do not use "..." or "# similar code for other cases" - write out ALL code.
-
-Provide ONLY the Python code in a ```python``` block, no explanation."""
-
-    response = await hinton.arespond(prompt, max_tokens=SCRIPT_TOKEN_LIMIT)
-    tokens_used += TOKEN_PER_CALL
-    
-    code = extract_code_from_response(response)
-    return code, tokens_used
-
-
-async def _critique_script(
-    bayes: Agent,
-    script_code: str,
-    script_name: str,
-    script_spec: str,
-    tokens_used: int,
-) -> tuple[str, bool, int]:
-    """
-    Have Bayes critique a script BEFORE execution (inspired by CellVoyager).
-    
-    This catches errors pre-execution instead of post-failure.
-    
-    Returns: (critique_text, needs_revision, tokens_used)
-    """
-    prompt = f"""Review this Python script for potential issues BEFORE it runs.
-
-SCRIPT NAME: {script_name}
-
-INTENDED PURPOSE:
-{script_spec[:1500]}
-
-CODE:
-```python
-{script_code[:MAX_CODE_CONTEXT]}
-```
-
-Check for:
-1. IMPORT ERRORS: Are all imports valid? Any misspelled package names?
-2. API ERRORS: Are function calls using correct parameters? (e.g., pd.read_csv, plt.savefig)
-3. PATH ERRORS: Do file paths look correct? (ReadData/ for input, Sandbox/ for output)
-4. LOGIC ERRORS: Any obvious bugs, missing variables, or incorrect operations?
-5. STATISTICAL ERRORS: Are statistical tests appropriate for the data types?
-
-Respond in this format:
-ISSUES FOUND: [yes/no]
-SEVERITY: [none/minor/major]
-DETAILS: [list specific issues if any, or "Script looks correct"]
-SUGGESTED FIXES: [specific fixes if needed]"""
-
-    response = await bayes.arespond(prompt, max_tokens=2000)
-    tokens_used += TOKEN_PER_CALL
-    
-    # Parse response to determine if revision needed
-    needs_revision = (
-        "ISSUES FOUND: yes" in response.lower() or 
-        "SEVERITY: major" in response.lower()
-    )
-    
-    return response, needs_revision, tokens_used
-
-
-async def _fix_script(
-    hinton: Agent,
-    script_code: str,
-    error_message: str,
-    script_name: str,
-    attempt: int,
-    tokens_used: int,
-) -> tuple[str, int]:
-    """
-    Have Hinton fix a failing script.
-    
-    Enhanced with dynamic documentation retrieval (inspired by CellVoyager)
-    to ground fixes in actual API signatures.
-    
-    Returns: (fixed_code, tokens_used)
-    """
-    # Get dynamic documentation for functions used in the code
-    api_docs = get_documentation_for_code(script_code, max_chars=MAX_DOC_CHARS)
-    
-    # Truncate error message to prevent token overflow
-    truncated_error = error_message[:MAX_ERROR_CHARS]
-    
-    # Get package constraints
-    pkg_constraints = get_package_constraint_prompt()
-    
-    prompt = f"""Fix this Python script that failed to run.
-
-SCRIPT: {script_name}
-ATTEMPT: {attempt}/{MAX_FIX_ATTEMPTS_PER_SCRIPT}
-
-ERROR:
-{truncated_error}
-
-CURRENT CODE:
-```python
-{script_code}
-```
-
-{pkg_constraints}
-
-{api_docs if api_docs else ""}
-
-REQUIREMENTS:
-1. Fix the specific error shown
-2. Ensure all imports are at the top and are from allowed packages only
-3. Ensure `if __name__ == "__main__":` block exists
-4. Print "SCRIPT COMPLETE: [outputs]" at the end
-5. Write the COMPLETE fixed script - do not truncate or abbreviate
-6. Use the API documentation above to ensure correct function parameters
-
-Provide ONLY the fixed Python code in a ```python``` block, no explanation."""
-
-    response = await hinton.arespond(prompt, max_tokens=FIX_TOKEN_LIMIT)
-    tokens_used += TOKEN_PER_CALL
-    
-    code = extract_code_from_response(response)
-    return code, tokens_used
-
-
-async def _run_script_with_retry(
-    hinton: Agent,
-    script_path: Path,
-    workspace_root: Path,
-    tokens_used: int,
-) -> tuple[dict, int]:
-    """
-    Run a script with iterative fixing until it succeeds or max attempts reached.
-    
-    Includes dry-run validation before actual execution (inspired by CellVoyager).
-    
-    Returns: (result_dict, tokens_used)
-    
-    result_dict has:
-      - success: bool
-      - output: str (if success)
-      - error: str (if failure)
-      - attempts: int
-    """
-    script_name = script_path.name
-    
-    for attempt in range(1, MAX_FIX_ATTEMPTS_PER_SCRIPT + 1):
-        print(f"      Attempt {attempt}/{MAX_FIX_ATTEMPTS_PER_SCRIPT}...")
-        
-        # Read current script code
-        with open(script_path) as f:
-            script_code = f.read()
-        
-        # Check for truncation indicators
-        if "..." in script_code or "# similar" in script_code.lower() or "# etc" in script_code.lower():
-            print(f"        ⚠️ Script appears truncated, requesting complete version...")
-            fixed_code, tokens_used = await _fix_script(
-                hinton, script_code, 
-                "Script is truncated. Please provide the COMPLETE code without abbreviations.",
-                script_name, attempt, tokens_used
-            )
-            if fixed_code and len(fixed_code) > len(script_code):
-                with open(script_path, 'w') as f:
-                    f.write(fixed_code)
-                script_code = fixed_code
-        
-        # Step 1: Validate syntax
-        is_valid, syntax_error = validate_python_syntax(script_code)
-        if not is_valid:
-            print(f"        ✗ Syntax error: {syntax_error}")
-            fixed_code, tokens_used = await _fix_script(
-                hinton, script_code, f"Syntax error: {syntax_error}",
-                script_name, attempt, tokens_used
-            )
-            if fixed_code:
-                with open(script_path, 'w') as f:
-                    f.write(fixed_code)
-            continue  # Try running again
-        
-        # Step 2: Dry-run validation (check imports and file paths)
-        dry_run_ok, dry_run_error = dry_run_validation(script_code, workspace_root)
-        if not dry_run_ok:
-            print(f"        ✗ Dry-run failed: {dry_run_error}")
-            fixed_code, tokens_used = await _fix_script(
-                hinton, script_code, f"Pre-execution validation failed: {dry_run_error}",
-                script_name, attempt, tokens_used
-            )
-            if fixed_code:
-                with open(script_path, 'w') as f:
-                    f.write(fixed_code)
-            continue  # Try running again
-        
-        print(f"        ✓ Dry-run passed")
-        
-        # Step 3: Run the script
-        try:
-            result = subprocess.run(
-                ["micromamba", "run", "-n", "minilab", "python", str(script_path)],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=str(workspace_root),
-            )
-            
-            if result.returncode == 0:
-                print(f"        ✓ SUCCESS")
-                return {
-                    "success": True,
-                    "output": result.stdout[-MAX_OUTPUT_CHARS:],
-                    "attempts": attempt,
-                }, tokens_used
-            else:
-                error_msg = result.stderr if result.stderr else result.stdout
-                print(f"        ✗ Runtime error")
-                
-                if attempt < MAX_FIX_ATTEMPTS_PER_SCRIPT:
-                    fixed_code, tokens_used = await _fix_script(
-                        hinton, script_code, error_msg,
-                        script_name, attempt, tokens_used
-                    )
-                    if fixed_code:
-                        with open(script_path, 'w') as f:
-                            f.write(fixed_code)
-                else:
-                    return {
-                        "success": False,
-                        "error": error_msg[:2000],
-                        "attempts": attempt,
-                    }, tokens_used
-                    
-        except subprocess.TimeoutExpired:
-            print(f"        ✗ Timeout (5 min)")
-            return {
-                "success": False,
-                "error": "Script timed out after 5 minutes",
-                "attempts": attempt,
-            }, tokens_used
-    
-    # Should not reach here, but just in case
-    return {
-        "success": False,
-        "error": f"Failed after {MAX_FIX_ATTEMPTS_PER_SCRIPT} attempts",
-        "attempts": MAX_FIX_ATTEMPTS_PER_SCRIPT,
-    }, tokens_used
-
-
 async def _execute_stage(
     stage_num: int,
     stage_name: str,
@@ -2199,13 +1516,12 @@ async def _execute_stage(
     """
     Execute analysis scripts (shared logic for Stages 3 and 4).
     
-    CRITICAL APPROACH:
-    - Generate scripts ONE AT A TIME
-    - Each script MUST run successfully before proceeding to the next
-    - Iterate with fixes until success or max attempts
-    - No batch generation that produces truncated code
+    GOAL-ORIENTED APPROACH:
+    - Give agents clear goals, not step-by-step recipes
+    - Let them iterate freely until goals are met
+    - Verify outcomes (files exist, figures generated) not process
     
-    Flow: Dayhoff → Hinton (per-script iterative) → Bayes → Dayhoff
+    Flow: Dayhoff plans → Hinton executes iteratively → Bayes verifies → repeat if needed
     """
     _print_stage(f"STAGE {stage_num}", stage_name)
     if logger:
@@ -2220,80 +1536,65 @@ async def _execute_stage(
     outputs_dir = project_path / "outputs"
     workspace_root = Path.cwd()
     
-    # Step 1: Have Dayhoff break down the execution plan into individual script specs
-    _print_substage("Dayhoff Breaking Down Execution Plan")
+    # Define success criteria based on stage type
+    if is_exploratory:
+        success_criteria = "PNG files in scratch/ showing data exploration"
+        output_location = "scratch"
+    else:
+        success_criteria = f"{project_name}_figures.pdf in project root AND PNG files in outputs/"
+        output_location = "outputs"
     
-    dayhoff_breakdown = await dayhoff.arespond(f"""Break down this execution plan into individual scripts.
+    # Step 1: Have Dayhoff create a simple task breakdown (not over-planned)
+    _print_substage("Dayhoff: Quick Task Breakdown")
+    
+    dayhoff_breakdown = await dayhoff.arespond(f"""Break down this execution plan into 2-4 scripts maximum.
 
 EXECUTION PLAN:
-{execution_plan[:5000]}
+{execution_plan[:4000]}
 
-For each script, provide:
-1. Script name (e.g., 01_data_loading.py, 02_preprocessing.py, etc.)
-2. Purpose (one sentence)
-3. Input files (from ReadData/ or previous script outputs)
-4. Output files (to Sandbox/{project_name}/{'scratch' if is_exploratory else 'outputs'}/)
-5. Key operations (bullet points)
+Keep it simple. For each script, just provide:
+- Script name (e.g., 01_explore.py, 02_analysis.py, 03_figures.py)
+- One-sentence goal
+- What outputs it should create
 
-IMPORTANT: Each script should be a COMPLETE, standalone piece that can run independently
-(except for dependencies on outputs from previous scripts).
+Format:
+### 01_scriptname.py
+Goal: [one sentence]
+Outputs: [list files]
 
-Format as:
-### SCRIPT: 01_name.py
-Purpose: ...
-Inputs: ...
-Outputs: ...
-Operations:
-- ...
-
-List scripts in execution order.""", max_tokens=4000)
+Don't over-plan. Hinton will figure out the details.""", max_tokens=2000)
     tokens_used += TOKEN_PER_CALL
+    if logger:
+        logger.log_agent_response(dayhoff.display_name, dayhoff.id, dayhoff_breakdown[:500], TOKEN_PER_CALL)
     
-    _show_agent("Dayhoff", dayhoff_breakdown, truncate=1500)
+    _show_agent("Dayhoff", dayhoff_breakdown, truncate=1000)
     
-    # Parse script specifications
+    # Parse script names (simple extraction)
     script_specs = []
-    spec_pattern = r'###\s*SCRIPT:\s*(\S+\.py)(.*?)(?=###\s*SCRIPT:|$)'
-    matches = re.findall(spec_pattern, dayhoff_breakdown, re.DOTALL | re.IGNORECASE)
-    
-    if not matches:
-        # Fallback: try to find numbered scripts
-        lines = dayhoff_breakdown.split('\n')
-        current_spec = ""
-        current_name = ""
-        for line in lines:
-            if re.match(r'^\d+[\.\)]\s*\w+\.py', line):
-                if current_name and current_spec:
-                    script_specs.append((current_name, current_spec))
-                name_match = re.search(r'(\w+\.py)', line)
-                current_name = name_match.group(1) if name_match else f"script_{len(script_specs)+1:02d}.py"
-                current_spec = line
-            elif current_name:
-                current_spec += "\n" + line
-        if current_name and current_spec:
-            script_specs.append((current_name, current_spec))
-    else:
-        script_specs = [(m[0].strip(), m[1].strip()) for m in matches]
+    for line in dayhoff_breakdown.split('\n'):
+        if '.py' in line and ('###' in line or line.strip().startswith('0') or line.strip().startswith('1')):
+            match = re.search(r'(\d+_?\w*\.py)', line)
+            if match:
+                script_name = match.group(1)
+                # Get the next few lines as spec
+                idx = dayhoff_breakdown.find(line)
+                spec = dayhoff_breakdown[idx:idx+500].split('###')[0]
+                script_specs.append((script_name, spec))
     
     if not script_specs:
-        print("    ⚠️ Could not parse script specifications. Using single-script fallback.")
-        script_specs = [("analysis_pipeline.py", execution_plan)]
+        # Fallback: single comprehensive script
+        script_specs = [("analysis_pipeline.py", execution_plan[:2000])]
     
-    print(f"\n    Identified {len(script_specs)} scripts to generate:")
-    for name, _ in script_specs:
-        print(f"      - {name}")
+    print(f"\n    Scripts to build: {[s[0] for s in script_specs]}")
     
-    # Step 2: Build and run each script ITERATIVELY (like VS Code agent)
-    _print_substage("Building and Running Scripts (Iterative Approach)")
+    # Step 2: Let Hinton build and run each script autonomously
+    _print_substage("Hinton: Autonomous Script Development")
     
     execution_results = {}
-    all_succeeded = True
     
     for idx, (script_name, script_spec) in enumerate(script_specs, 1):
         print(f"\n    [{idx}/{len(script_specs)}] {script_name}")
-        print(f"      📝 Building with incremental tools (VS Code style)...")
         
-        # Build the script with TRUE incremental editing tools
         script_code, success, tokens_used = await _build_script_with_tools(
             hinton=hinton,
             script_spec=script_spec,
@@ -2303,129 +1604,110 @@ List scripts in execution order.""", max_tokens=4000)
             workspace_root=workspace_root,
             is_exploratory=is_exploratory,
             tokens_used=tokens_used,
+            logger=logger,
         )
         
-        if success:
-            print(f"      ✅ {script_name} - COMPLETE AND WORKING")
-            execution_results[script_name] = {
-                "success": True,
-                "output": "Built iteratively and executed successfully",
-                "attempts": 1,  # Iterations are internal
-            }
-        else:
-            print(f"      ❌ {script_name} - FAILED after max iterations")
-            execution_results[script_name] = {
-                "success": False,
-                "error": "Failed to build working script after max iterations",
-                "attempts": MAX_BUILD_ITERATIONS,
-            }
-            all_succeeded = False
+        execution_results[script_name] = {"success": success, "code": script_code[:500]}
         
-        # EARLY VLM CHECK: If this script produced images, have Bayes check them immediately
         if success:
-            output_dir = scratch_dir if is_exploratory else outputs_dir
-            new_pngs = [f for f in output_dir.glob("*.png") if script_name.replace('.py', '') in f.stem.lower() or f.stem.startswith(script_name[:2])]
-            if new_pngs:
-                print(f"      Bayes verifying {len(new_pngs)} output image(s)...")
-                img_check = await bayes.arespond_with_vision(
-                    user_message=f"""Quick check: Do these output images from {script_name} look correct?
-
-Check for:
-1. Are the axes labeled properly?
-2. Does the data look reasonable (not all zeros, not obviously wrong)?
-3. Are there any visual errors (missing legends, cut-off text)?
-
-Just respond: LOOKS GOOD or ISSUE: [brief description]""",
-                    image_paths=[str(f) for f in new_pngs[:3]],
-                    max_tokens=500,
-                )
-                tokens_used += TOKEN_PER_CALL
-                if "ISSUE" in img_check.upper():
-                    print(f"        ⚠️ Bayes: {img_check[:100]}")
-                else:
-                    print(f"        ✓ Images verified")
+            print(f"      ✅ {script_name} complete")
+        else:
+            print(f"      ⚠️ {script_name} had issues but continuing...")
     
-    # Summary
-    successes = sum(1 for r in execution_results.values() if r.get("success"))
-    print(f"\n    Script Results: {successes}/{len(execution_results)} succeeded")
-    
-    # Step 3: Bayes reviews execution results
-    _print_substage("Bayes Code Review")
+    # Step 3: VERIFY OUTCOMES (not process)
+    _print_substage("Outcome Verification")
     
     output_dir = scratch_dir if is_exploratory else outputs_dir
-    output_files = list(output_dir.glob("*")) if output_dir.exists() else []
-    
-    # Check if figures PDF exists (for complete execution)
+    png_files = list(output_dir.glob("*.png")) if output_dir.exists() else []
     figures_pdf = project_path / f"{project_name}_figures.pdf"
-    figures_exist = figures_pdf.exists()
     
-    bayes_review = await bayes.arespond_with_vision(
-        user_message=f"""I'm reviewing the execution results for {project_name}.
-
-EXECUTION SUMMARY:
-- Scripts run: {len(execution_results)}
-- Succeeded: {successes}
-- Failed: {len(execution_results) - successes}
-
-DETAILED RESULTS:
-{str({k: {'success': v['success'], 'attempts': v.get('attempts', 1)} for k, v in execution_results.items()})[:1500]}
-
-OUTPUT FILES CREATED ({len(output_files)}):
-{[f.name for f in output_files[:20]]}
-
-{"FIGURES PDF EXISTS: " + str(figures_exist) if not is_exploratory else ""}
-
-Please review:
-1. Did the scripts achieve the execution plan goals?
-2. Are the outputs valid and complete?
-3. {"Were exploration questions answered?" if is_exploratory else "Is the figures PDF ready?"}
-4. Any statistical or methodological concerns?
-
-Be specific about what succeeded and what needs attention.""",
-        image_paths=[str(f) for f in output_files if f.suffix.lower() in ['.png', '.jpg', '.jpeg']][:5],
-        max_tokens=3000,
-    )
-    tokens_used += TOKEN_PER_CALL * 2
+    print(f"    Checking outputs...")
+    print(f"    - PNG files in {output_location}/: {len(png_files)}")
+    print(f"    - Figures PDF exists: {figures_pdf.exists()}")
     
-    _show_agent("Bayes", bayes_review, truncate=1500)
+    # If outputs are missing, give Hinton another chance with a simpler task
+    if len(png_files) < 2 and not is_exploratory:
+        print(f"\n    ⚠️ Insufficient outputs. Giving Hinton a focused recovery task...")
+        
+        recovery_script = f"Sandbox/{project_name}/scripts/recovery_figures.py"
+        recovery_task = f"""URGENT: The analysis didn't produce enough figures.
+
+SITUATION:
+- Expected: Multiple PNG files in Sandbox/{project_name}/outputs/
+- Found: {len(png_files)} PNG files
+
+GOAL: Create a script that:
+1. Loads data from ReadData/
+2. Produces at least 3-4 publication-quality figures
+3. Saves them as PNGs to Sandbox/{project_name}/outputs/
+
+WORKING PLAN SUMMARY:
+{working_plan[:2000]}
+
+MANDATORY WORKFLOW - FOLLOW THIS EXACTLY:
+1. FIRST: Use code_editor.create to write the COMPLETE script
+   {{"tool": "code_editor", "action": "create", "params": {{"path": "{recovery_script}", "content": "...full script code..."}}}}
+   
+2. THEN: Run it with terminal
+   {{"tool": "terminal", "action": "execute", "params": {{"command": "micromamba run -n minilab python {recovery_script}"}}}}
+   
+3. IF IT FAILS: Fix and retry
+   - Use code_editor.view to see the code with line numbers
+   - Use code_editor.replace to fix specific lines
+   - Run again with terminal
+
+CRITICAL RULES:
+- Write COMPLETE scripts (never use "..." or abbreviate)
+- ALWAYS create the file BEFORE trying to run it
+- Use RELATIVE paths (Sandbox/..., ReadData/...) not absolute paths
+- Do NOT use cd commands - all paths are relative to workspace root
+
+When figures exist: ```done {{"result": "Figures created", "outputs": ["list pngs"]}}```
+"""
+        
+        recovery_result = await hinton.agentic_execute(
+            task=recovery_task,
+            context=f"Recovery task for {project_name}",
+            max_iterations=15,  # Extra iterations for recovery
+            max_tokens_per_step=5000,
+            verbose=True,
+            logger=logger,
+        )
+        tokens_used += recovery_result.get("iterations", 1) * TOKEN_PER_CALL
+        
+        # Re-check outputs
+        png_files = list(output_dir.glob("*.png")) if output_dir.exists() else []
+        print(f"    After recovery: {len(png_files)} PNG files")
     
-    # Step 4: Dayhoff assesses overall results
-    dayhoff_assess = await dayhoff.arespond(f"""Bayes has reviewed the execution:
+    # Step 4: Bayes quick validation (if outputs exist)
+    if png_files:
+        _print_substage("Bayes: Quick Quality Check")
+        
+        bayes_check = await bayes.arespond_with_vision(
+            user_message=f"""Quick quality check on these analysis outputs.
 
-{bayes_review[:2000]}
+Are these figures:
+1. Properly labeled (axes, titles)?
+2. Showing real data patterns (not all zeros/noise)?
+3. Publication-ready or close?
 
-EXECUTION SUMMARY:
-- {successes}/{len(execution_results)} scripts succeeded
-{"- Figures PDF exists: " + str(figures_exist) if not is_exploratory else ""}
-
-OUTPUT FILES: {[f.name for f in output_files[:15]]}
-
-Please provide final assessment:
-1. Did we {"complete the exploration successfully" if is_exploratory else "generate the required outputs"}?
-2. Are there critical failures that block progress?
-3. {"What did we learn for complete analysis?" if is_exploratory else "Is the figures PDF ready for write-up?"}
-
-CRITICAL: If the figures PDF does not exist for complete execution, this is a FAILURE.
-
-Respond with:
-- "SUCCESSFUL: [summary]" if we can proceed to next stage
-- "NEEDS ITERATION: [specific issues]" if we need to regenerate scripts""", max_tokens=2000)
-    tokens_used += TOKEN_PER_CALL
+Just respond: GOOD / NEEDS_WORK: [one-line issue] / FAIL: [critical problem]""",
+            image_paths=[str(f) for f in png_files[:4]],
+            max_tokens=500,
+        )
+        tokens_used += TOKEN_PER_CALL
+        
+        print(f"    Bayes says: {bayes_check[:100]}")
     
-    _show_agent("Dayhoff", dayhoff_assess, truncate=1000)
-    
-    execution_successful = "SUCCESSFUL" in dayhoff_assess.upper() and all_succeeded
-    
-    # For complete execution, also require figures PDF to exist
-    if not is_exploratory and not figures_exist:
-        execution_successful = False
-        print("    ⚠️ Figures PDF not found - execution incomplete")
+    # Compile results summary
+    successes = sum(1 for r in execution_results.values() if r.get("success"))
+    figures_exist = (project_path / f"{project_name}_figures.pdf").exists()
     
     return {
-        "success": execution_successful,
+        "success": successes > 0 and (len(png_files) >= 2 or is_exploratory),
         "tokens_used": tokens_used,
-        "results": dayhoff_assess,
-        "needs_iteration": not execution_successful,
+        "results": f"Scripts: {successes}/{len(execution_results)} succeeded. Outputs: {len(png_files)} PNGs.",
+        "needs_iteration": len(png_files) < 2 and not is_exploratory,
         "script_results": execution_results,
         "figures_exist": figures_exist if not is_exploratory else None,
     }

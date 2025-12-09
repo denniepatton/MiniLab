@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from MiniLab.llm_backends.base import ChatMessage, LLMBackend
 
+if TYPE_CHECKING:
+    from MiniLab.storage.transcript import TranscriptLogger
+
 
 # Maximum iterations for agentic loops to prevent runaway
-MAX_AGENTIC_ITERATIONS = 15
+MAX_AGENTIC_ITERATIONS = 30  # Increased for ReAct-style small iterations
 
 
 @dataclass
@@ -43,10 +45,10 @@ class Agent:
         Ask another agent for input or advice on a specific point.
         
         Use this when you need:
-        - Clarification on a suggestion from another agent
+        - Clarification on a suggestion from another, particular agent
         - Quick statistical/methodological advice
-        - Domain expertise outside your specialty
-        - Verification of an approach before implementing
+        - Domain expertise outside your explicit specialty
+        - Verification of the validity of an approach before implementing
         
         Args:
             colleague_id: The ID of the agent to consult (e.g., "bayes", "feynman")
@@ -187,7 +189,7 @@ Please provide a focused, helpful response. Be concise but thorough."""
                     "CRITICAL OPERATING MODE:\n"
                     "- You are ACTIVELY WORKING on a project RIGHT NOW, not planning for the future\n"
                     "- When you say 'we will do X', it means 'we are doing X in the next immediate step'\n"
-                    "- Do not reference timelines like 'over the coming days/weeks' - everything happens NOW\n"
+                    "- Do not reference timelines like 'over the coming days/weeks' - everything happens now\n"
                     "- Focus on IMMEDIATE ACTIONS that can be executed in this session\n"
                     "- Be specific about what file/script/analysis is being created NEXT\n\n"
                     "FILE ACCESS:\n"
@@ -320,6 +322,7 @@ Please provide a focused, helpful response. Be concise but thorough."""
         max_iterations: int = MAX_AGENTIC_ITERATIONS,
         max_tokens_per_step: int = 2000,
         verbose: bool = True,
+        logger: Optional['TranscriptLogger'] = None,
     ) -> Dict[str, Any]:
         """
         Execute a task with full agentic capabilities (ReAct-style loop).
@@ -330,14 +333,13 @@ Please provide a focused, helpful response. Be concise but thorough."""
         - Consult colleagues and incorporate their input
         - Iterate until the task is complete
         
-        This is the TRUE agentic mode - like a VS Code agent.
-        
         Args:
             task: The task to accomplish
             context: Additional context
             max_iterations: Safety limit on iterations
             max_tokens_per_step: Tokens per reasoning step
             verbose: Print progress
+            logger: Optional TranscriptLogger for logging all operations
             
         Returns:
             Dict with 'success', 'result', 'iterations', 'tool_calls', etc.
@@ -345,6 +347,10 @@ Please provide a focused, helpful response. Be concise but thorough."""
         # Build tool descriptions
         tool_descriptions = self._build_tool_descriptions()
         colleague_descriptions = self._build_colleague_descriptions()
+        
+        # Get workspace root for path guidance
+        import os
+        workspace_root = os.getcwd()
         
         system_prompt = f"""You are {self.display_name}, {self.role} in the MiniLab team.
 
@@ -355,6 +361,29 @@ You are operating in AGENTIC MODE. You can:
 2. USE TOOLS to take actions  
 3. ASK COLLEAGUES for help
 4. OBSERVE results and continue
+
+WORKSPACE ENVIRONMENT:
+- Working directory: {workspace_root}
+- Data location: ReadData/ (READ-ONLY - explore but don't modify)
+- Output location: Sandbox/ (READ-WRITE - create scripts, outputs here)
+- Python environment: micromamba run -n minilab python <script.py>
+- All paths are RELATIVE to workspace root (e.g., "Sandbox/ProjectName/scripts/")
+
+CRITICAL WORKFLOW FOR SCRIPTS:
+1. FIRST create the script file using code_editor.create
+2. THEN run it using terminal.execute with: micromamba run -n minilab python Sandbox/path/to/script.py
+3. If errors occur, use code_editor.edit to fix, then run again
+4. NEVER try to run a script before creating it!
+
+OPERATIONAL CONSTRAINTS:
+- You have {max_iterations} iterations maximum for this task
+- Each iteration = one response from you (tool call or thinking)
+- Work efficiently: use tools to gather info, then produce output
+- If running low on iterations and need more time, you can REQUEST MORE:
+  ```extend
+  {{"request": "need_more_iterations", "current_progress": "what you've done so far", "remaining_work": "what still needs to be done", "additional_needed": 10}}
+  ```
+- If at iteration {max_iterations - 2} or later: either finish OR request extension
 
 AVAILABLE TOOLS:
 {tool_descriptions}
@@ -367,6 +396,12 @@ When you want to use a tool, output a JSON block like this:
 ```tool
 {{"tool": "tool_name", "action": "action_name", "params": {{"key": "value"}}}}
 ```
+
+COMMON TOOL PATTERNS:
+- Create a file: {{"tool": "code_editor", "action": "create", "params": {{"path": "Sandbox/Project/scripts/my_script.py", "content": "import pandas..."}}}}
+- Run a script: {{"tool": "terminal", "action": "execute", "params": {{"command": "micromamba run -n minilab python Sandbox/Project/scripts/my_script.py"}}}}
+- List files: {{"tool": "terminal", "action": "execute", "params": {{"command": "ls -la ReadData/"}}}}
+- Read file: {{"tool": "filesystem", "action": "read", "params": {{"path": "ReadData/file.csv"}}}}
 
 HOW TO ASK A COLLEAGUE:
 ```colleague
@@ -381,11 +416,11 @@ When you've finished the task, output:
 
 WORKFLOW:
 1. Think step by step about what you need to do
-2. Use tools/colleagues as needed
+2. Use tools/colleagues as needed (but don't overdo it!)
 3. Observe results and adjust
-4. When complete, signal done
+4. When complete OR running low on iterations, signal done with what you have
 
-Be concise. Act, don't just describe what you would do.
+Be concise. Act, don't just describe what you would do. Produce outputs, not plans.
 """
         
         messages: List[ChatMessage] = [
@@ -402,12 +437,19 @@ Be concise. Act, don't just describe what you would do.
         tool_calls = []
         colleague_calls = []
         all_outputs = []
+        current_action = "thinking"
+        
+        # Helper for single-line status updates
+        def _update_status(msg: str, final: bool = False):
+            """Update the status line (overwrites previous on same line)."""
+            if verbose:
+                end = "\n" if final else "\r"
+                # Clear line and print new status
+                print(f"      [{self.display_name}] {msg}".ljust(80), end=end, flush=True)
         
         while iterations < max_iterations:
             iterations += 1
-            
-            if verbose:
-                print(f"      [{self.display_name}] Iteration {iterations}...")
+            _update_status(f"Iteration {iterations}/{max_iterations}: {current_action}...")
             
             # Get agent's response
             response = await self.backend.acomplete(messages, max_tokens=max_tokens_per_step)
@@ -415,13 +457,30 @@ Be concise. Act, don't just describe what you would do.
             # Add response to conversation
             messages.append({"role": "assistant", "content": response})
             
+            # Check for extension request
+            extend_match = re.search(r'```extend\s*\n(.*?)\n```', response, re.DOTALL)
+            if extend_match:
+                try:
+                    extend_data = json.loads(extend_match.group(1))
+                    additional = min(extend_data.get("additional_needed", 10), 20)  # Cap at 20
+                    
+                    max_iterations += additional
+                    _update_status(f"Extended by {additional} iterations (now {max_iterations} max)", final=True)
+                    
+                    messages.append({
+                        "role": "user",
+                        "content": f"EXTENSION GRANTED: You now have {max_iterations - iterations} more iterations. Continue working."
+                    })
+                    continue
+                except json.JSONDecodeError:
+                    pass
+            
             # Check for completion
             done_match = re.search(r'```done\s*\n(.*?)\n```', response, re.DOTALL)
             if done_match:
                 try:
                     done_data = json.loads(done_match.group(1))
-                    if verbose:
-                        print(f"      [{self.display_name}] ✓ Task complete")
+                    _update_status(f"✓ Complete after {iterations} iterations", final=True)
                     return {
                         "success": True,
                         "result": done_data.get("result", response),
@@ -443,8 +502,8 @@ Be concise. Act, don't just describe what you would do.
                     action = tool_data.get("action")
                     params = tool_data.get("params", {})
                     
-                    if verbose:
-                        print(f"        🔧 Using {tool_name}.{action}...")
+                    current_action = f"{tool_name}.{action}"
+                    _update_status(f"Iteration {iterations}/{max_iterations}: 🔧 {current_action}")
                     
                     # Execute the tool
                     result = await self.use_tool(tool_name, action, **params)
@@ -455,15 +514,33 @@ Be concise. Act, don't just describe what you would do.
                         "result": result,
                     })
                     
+                    # Log the tool operation
+                    if logger:
+                        logger.log_tool_operation(
+                            self.display_name,
+                            tool_name,
+                            action,
+                            params,
+                            result
+                        )
+                    
                     # Format result for agent
                     result_str = json.dumps(result, indent=2, default=str)
                     if len(result_str) > 3000:
                         result_str = result_str[:3000] + "\n... (truncated)"
                     
+                    # Add iteration awareness to help agent pace itself
+                    remaining = max_iterations - iterations
+                    urgency = ""
+                    if remaining <= 2:
+                        urgency = f"\n⚠️ LOW ITERATIONS: {remaining} left. Wrap up and signal done soon!"
+                    elif remaining <= 4:
+                        urgency = f"\n📊 Iterations remaining: {remaining}. Start producing final output."
+                    
                     # Add observation to conversation
                     messages.append({
                         "role": "user",
-                        "content": f"TOOL RESULT ({tool_name}.{action}):\n```\n{result_str}\n```\n\nContinue with your task."
+                        "content": f"TOOL RESULT ({tool_name}.{action}):\n```\n{result_str}\n```{urgency}\n\nContinue with your task."
                     })
                     
                     if result.get("success"):
@@ -487,8 +564,8 @@ Be concise. Act, don't just describe what you would do.
                     colleague_id = colleague_data.get("colleague")
                     question = colleague_data.get("question")
                     
-                    if verbose:
-                        print(f"        💬 Asking {colleague_id}...")
+                    current_action = f"asking {colleague_id}"
+                    _update_status(f"Iteration {iterations}/{max_iterations}: 💬 {current_action}")
                     
                     # Ask the colleague
                     result = await self.ask_colleague(
@@ -504,6 +581,17 @@ Be concise. Act, don't just describe what you would do.
                     
                     if result.get("success"):
                         colleague_response = result.get("response", "No response")
+                        
+                        # Log the consultation
+                        if logger:
+                            logger.log_agent_consultation(
+                                from_agent=self.display_name,
+                                to_agent=result.get("colleague", colleague_id),
+                                question=question,
+                                response=colleague_response[:500],  # Truncate for log
+                                tokens_used=500,  # Estimate
+                            )
+                        
                         if len(colleague_response) > 2000:
                             colleague_response = colleague_response[:2000] + "\n... (truncated)"
                         
@@ -527,6 +615,7 @@ Be concise. Act, don't just describe what you would do.
                     continue
             
             # No special blocks found - agent is just thinking/responding
+            current_action = "thinking"
             # Prompt to continue or finish
             if iterations < max_iterations - 1:
                 messages.append({
@@ -535,8 +624,7 @@ Be concise. Act, don't just describe what you would do.
                 })
         
         # Max iterations reached
-        if verbose:
-            print(f"      [{self.display_name}] ⚠️ Max iterations reached")
+        _update_status(f"⚠️ Max iterations ({max_iterations}) reached", final=True)
         
         return {
             "success": False,
