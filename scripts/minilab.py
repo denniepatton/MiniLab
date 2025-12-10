@@ -1,220 +1,357 @@
+#!/usr/bin/env python3
 """
-MiniLab Main Entry Point
+MiniLab - Multi-Agent Scientific Lab Assistant
 
-Provides a menu for selecting different interaction modes:
-- Single Analysis: Comprehensive guild-based research workflow
-- Regular Meeting: Interactive conversation with PI coordination
-- Direct Team Meeting: All agents respond in parallel (future)
+Command-line interface for running MiniLab analysis sessions.
+
+Usage:
+    python scripts/minilab.py "Analyze the genomic data"
+    python scripts/minilab.py --project my_project --workflow start_project
+    python scripts/minilab.py --resume Sandbox/my_project
+    python scripts/minilab.py --interactive
 """
 
+import argparse
 import asyncio
 import sys
 from pathlib import Path
+import json
 
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
-
-def display_menu():
-    """Display the main menu."""
-    print("\n" + "=" * 80)
-    print("MiniLab - Multi-Agent Research Assistant")
-    print("=" * 80)
-    print("\nSelect a mode:")
-    print("  1. Single Analysis - Team-based research workflow")
-    print("       • Comprehensive planning with specialist input")
-    print("       • Token budget: 100,000")
-    print("       • Outputs: figures.pdf, figure_legends.md, summary.pdf")
-    print()
-    print("  2. Regular Meeting - NOT AVAILABLE (removed)")
-    print("       • Use option 1 only")
-    print("       • Continuous conversation mode")
-    print("       • Token budget: 300,000 per session")
-    print()
-    print("  3. Exit")
-    print("=" * 80)
-    print()
+# Add parent to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-async def run_single_analysis_mode():
-    """Launch Single Analysis mode."""
-    # Import here to avoid loading everything upfront
-    from MiniLab import load_agents
-    from MiniLab.orchestrators.single_analysis import run_single_analysis
-    from MiniLab.storage.transcript import TranscriptLogger
-    
-    print("\n" + "=" * 80)
-    print("Single Analysis Mode")
-    print("=" * 80 + "\n")
-    
-    print("Enter your research question and path to data in ReadData/:")
-    research_question = input("> ").strip()
-    
-    if not research_question:
-        print("No research question provided. Returning to main menu.")
-        return
-    
-    print("Loading agents...")
-    
-    agents = load_agents()
-    print(f"Loaded {len(agents)} agents\n")
-    
-    # Initialize transcript logger (will be renamed with proper project name)
-    transcripts_dir = Path(__file__).parent.parent / "Transcripts"
-    logger = TranscriptLogger(transcripts_dir)
-    logger.start_session("single_analysis")
-    logger.log_user_message(research_question)
-    
-    print("Starting Single Analysis workflow...\n")
-    
-    # Run the analysis
-    result = await run_single_analysis(
-        agents=agents,
-        research_question=research_question,
-        max_tokens=100_000,
-        logger=logger,
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="MiniLab: Multi-agent scientific lab assistant",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Start a new analysis
+  python scripts/minilab.py "Analyze the Pluvicto genomic data"
+  
+  # Specify workflow explicitly
+  python scripts/minilab.py "What is the state of the art in proteomics?" --workflow literature_review
+  
+  # Resume an existing project
+  python scripts/minilab.py --resume Sandbox/pluvicto_analysis_20241215
+  
+  # Interactive mode
+  python scripts/minilab.py --interactive
+  
+Major Workflows:
+  brainstorming      - Explore ideas and approaches
+  literature_review  - Background research
+  start_project      - Full analysis pipeline (default)
+  work_on_existing   - Continue existing project
+  explore_dataset    - Data exploration focus
+
+Mini-Workflow Modules (used within major workflows):
+  CONSULTATION       - User discussion and requirement gathering
+  LITERATURE REVIEW  - Background research with PubMed/arXiv
+  PLANNING COMMITTEE - Multi-agent deliberation on approach
+  EXECUTE ANALYSIS   - Dayhoff->Hinton->Bayes implementation loop
+  WRITE-UP RESULTS   - Documentation and reporting
+  CRITICAL REVIEW    - Quality assessment and recommendations
+        """,
     )
     
-    # Save transcript
-    print("\nSaving transcript...")
-    transcript_path = logger.save_transcript()
-    print(f"Transcript saved to: {transcript_path}")
+    parser.add_argument(
+        "request",
+        nargs="?",
+        help="Analysis request or question",
+    )
     
-    # Display summary
-    print("\n" + "=" * 80)
-    print("ANALYSIS SUMMARY")
-    print("=" * 80)
+    parser.add_argument(
+        "--project", "-p",
+        help="Project name (auto-generated if not specified)",
+    )
     
-    # Check if analysis failed early (quick-fail)
-    if result.get('success') == False:
-        print(f"❌ Analysis failed at Stage {result.get('failed_at_stage', 'unknown')}")
-        print(f"Error: {result.get('error', 'Unknown error')}")
-        print(f"Total Tokens Used: ~{result.get('tokens_used', 0):,}")
-        if result.get('output_path'):
-            print(f"Output Directory: {result['output_path']}")
-    else:
-        # Normal completion
-        print(f"Research Question: {result['research_question']}")
-        print(f"Output Directory: {result['output_dir']}")
-        print(f"Total Tokens Used: ~{result['token_count']:,}")
+    parser.add_argument(
+        "--workflow", "-w",
+        choices=["brainstorming", "literature_review", "start_project", "work_on_existing", "explore_dataset"],
+        help="Workflow to run (auto-detected if not specified)",
+    )
     
-    print("=" * 80 + "\n")
+    parser.add_argument(
+        "--resume", "-r",
+        help="Path to existing project to resume",
+    )
     
-    input("Press Enter to return to main menu...")
+    parser.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Run in interactive mode with prompts",
+    )
+    
+    parser.add_argument(
+        "--list-projects", "-l",
+        action="store_true",
+        help="List existing projects in Sandbox",
+    )
+    
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Verbose output",
+    )
+    
+    return parser.parse_args()
 
 
-async def run_regular_meeting_mode():
-    """Launch Regular Meeting mode."""
-    from MiniLab import load_agents
-    from MiniLab.orchestrators.meetings import run_pi_coordinated_meeting
-    from MiniLab.storage.transcript import TranscriptLogger
+def list_projects() -> None:
+    """List existing projects in Sandbox."""
+    from MiniLab.utils import console
     
-    print("\n" + "=" * 80)
-    print("Regular Meeting Mode - PI-Coordinated")
-    print("=" * 80)
-    print("You'll speak with Franklin, who will coordinate with the team")
-    print("Type 'exit' or 'quit' to end the session")
-    print("=" * 80 + "\n")
+    sandbox = Path(__file__).parent.parent / "Sandbox"
     
-    agents = load_agents()
+    if not sandbox.exists():
+        console.warning("No Sandbox directory found.")
+        return
     
-    # Initialize transcript logger
-    transcripts_dir = Path(__file__).parent.parent / "Transcripts"
-    logger = TranscriptLogger(transcripts_dir)
-    logger.start_session("pi_coordinated_meeting")
+    # Find projects (have session.json)
+    projects = [d for d in sandbox.iterdir() if d.is_dir() and (d / "session.json").exists()]
     
-    # Accumulate conversation history for context
-    conversation_history = []
-    total_tokens = 0
+    # Find other directories
+    other_dirs = [d for d in sandbox.iterdir() if d.is_dir() and not (d / "session.json").exists()]
+    
+    console.header("MiniLab Projects")
+    
+    if projects:
+        print("\n📁 Projects (can be resumed):")
+        console.separator("-", 40)
+        
+        for project in sorted(projects):
+            try:
+                with open(project / "session.json") as f:
+                    session = json.load(f)
+                print(f"\n  {project.name}")
+                print(f"    Started: {session.get('started_at', 'Unknown')[:19]}")
+                completed = session.get('completed_workflows', [])
+                print(f"    Completed: {', '.join(completed) if completed else 'None'}")
+                current = session.get('current_workflow')
+                if current:
+                    print(f"    Current: {current}")
+            except Exception:
+                print(f"\n  {project.name} (unable to read session)")
+    
+    if other_dirs:
+        print(f"\n📂 Other directories ({len(other_dirs)}):")
+        console.separator("-", 40)
+        for d in sorted(other_dirs)[:10]:
+            print(f"  {d.name}")
+        if len(other_dirs) > 10:
+            print(f"  ... and {len(other_dirs) - 10} more")
+    
+    if not projects and not other_dirs:
+        console.info("No projects found.")
+    
+    print()
+
+
+async def interactive_mode() -> None:
+    """Run MiniLab in interactive mode."""
+    from MiniLab.utils import console
+    from MiniLab.orchestrators import BohrOrchestrator
+    from MiniLab.orchestrators.bohr_orchestrator import run_minilab
+    
+    console.header("MiniLab - Multi-Agent Scientific Lab Assistant")
+    print("\nWelcome! I'm Bohr, your orchestrator for scientific analysis.")
+    print("I coordinate a team of 9 specialist agents to help you with:")
+    print("  • Data analysis and modeling")
+    print("  • Literature review and synthesis")
+    print("  • Statistical validation")
+    print("  • Biological interpretation")
+    print("\nCommands: 'quit' | 'help' | 'list' | 'resume <path>'")
+    console.separator("─", 60)
+    
+    orchestrator = BohrOrchestrator()
     
     while True:
-        user_prompt = input("\nYou: ").strip()
-        
-        if user_prompt.lower() in ["exit", "quit", "q"]:
-            print("\nEnding session...")
-            # Save transcript
-            transcript_path = logger.save_transcript()
-            print(f"Transcript saved to: {transcript_path}")
-            print("Returning to main menu...")
-            return
-        
-        if not user_prompt:
-            continue
-        
-        # Log user message
-        logger.log_user_message(user_prompt)
-        
-        # Build project context from conversation history
-        if conversation_history:
-            project_context = "Previous conversation:\n" + "\n".join(
-                f"User: {entry['user']}\nFranklin: {entry['response'][:200]}..."
-                for entry in conversation_history[-3:]  # Last 3 exchanges for context
-            )
-        else:
-            project_context = None
+        try:
+            user_input = console.user_prompt("YOU")
+            
+            if not user_input:
+                continue
+            
+            if user_input.lower() in ["quit", "exit", "q"]:
+                print("\nGoodbye! Your projects are saved in Sandbox/")
+                break
+            
+            if user_input.lower() == "help":
+                print("\nCommands:")
+                print("  quit/exit    - End session")
+                print("  help         - Show this help")
+                print("  list         - List existing projects")
+                print("  resume <path> - Resume a project")
+                print("\nWorkflows (specify with --workflow or auto-detected):")
+                print("  brainstorming     - Explore ideas")
+                print("  literature_review - Background research")
+                print("  start_project     - Full analysis")
+                print("  work_on_existing  - Continue project")
+                print("  explore_dataset   - Data exploration")
+                print("\nOr just type your analysis request!")
+                continue
+            
+            if user_input.lower() == "list":
+                list_projects()
+                continue
+            
+            if user_input.lower().startswith("resume "):
+                path = user_input.split(" ", 1)[1]
+                project_path = Path(path)
+                if not project_path.is_absolute():
+                    project_path = Path(__file__).parent.parent / path
+                
+                try:
+                    await orchestrator.resume_session(project_path)
+                    console.workflow_start("Resuming session")
+                    results = await orchestrator.run()
+                    console.agent_message("BOHR", results.get('final_summary', 'Session completed.'))
+                except Exception as e:
+                    console.error(f"Could not resume: {e}")
+                continue
+            
+            # Regular analysis request
+            console.agent_message("BOHR", "Starting analysis session...")
+            console.info("I'll first consult with you to understand your needs,")
+            print("        then coordinate the appropriate specialists.\n")
+            
+            results = await run_minilab(request=user_input)
+            
+            console.agent_message("BOHR", results.get('final_summary', 'Analysis complete.'))
+            
+            if orchestrator.session:
+                console.info(f"Project saved to: {orchestrator.session.project_path}")
+            
+        except KeyboardInterrupt:
+            print("\n\nInterrupted. Type 'quit' to exit or continue with a new request.")
+        except Exception as e:
+            console.error(str(e))
+            import traceback
+            traceback.print_exc()
 
-        result = await run_pi_coordinated_meeting(
-            agents,
-            pi_agent_id="franklin",
-            user_prompt=user_prompt,
-            project_context=project_context,
-            max_total_tokens=300000,
-            logger=logger,
+
+def show_welcome() -> str:
+    """Display welcome message and prompt for input."""
+    from MiniLab.utils import console
+    
+    console.header("MiniLab - Multi-Agent Scientific Lab Assistant")
+    print()
+    print("  Welcome! I'm \033[1;36mBohr\033[0m, your orchestrator for scientific analysis.")
+    print("  I coordinate a team of 9 specialist AI agents to help you with research.")
+    print()
+    # Box using .ljust() for guaranteed alignment across all terminals
+    w = 73  # inner width
+    print("  ┌" + "─" * w + "┐")
+    print("  │" + " What can I help you with?".ljust(w) + "│")
+    print("  │" + "".ljust(w) + "│")
+    print("  │" + "  • Perform exploratory analysis of data in ReadData/TestData".ljust(w) + "│")
+    print("  │" + "  • What is CHIP and how does it relate to cancer therapies?".ljust(w) + "│")
+    print("  │" + "  • Review the literature on STEAP-1 targeting ADCs".ljust(w) + "│")
+    print("  │" + "  • Help me brainstorm hypotheses relating to ...".ljust(w) + "│")
+    print("  │" + "  • Let's iterate on the project in Sandbox/EHS-AI ...".ljust(w) + "│")
+    print("  │" + "".ljust(w) + "│")
+    print("  │" + " Or, simply describe what you need!".ljust(w) + "│")
+    print("  └" + "─" * w + "┘")
+    print()
+    
+    # Prompt for input
+    try:
+        user_input = input("  \033[1;32m▶ Your request:\033[0m ").strip()
+        return user_input
+    except (KeyboardInterrupt, EOFError):
+        print("\n\n  Goodbye!")
+        return ""
+
+
+async def main_async(args: argparse.Namespace) -> int:
+    """Async main function."""
+    from MiniLab.utils import console
+    
+    if args.verbose:
+        console.set_verbose(True)
+    
+    if args.list_projects:
+        list_projects()
+        return 0
+    
+    if args.interactive:
+        await interactive_mode()
+        return 0
+    
+    from MiniLab.orchestrators import BohrOrchestrator
+    from MiniLab.orchestrators.bohr_orchestrator import run_minilab
+    
+    if args.resume:
+        # Resume existing project
+        project_path = Path(args.resume)
+        if not project_path.is_absolute():
+            project_path = Path(__file__).parent.parent / args.resume
+        
+        orchestrator = BohrOrchestrator()
+        try:
+            await orchestrator.resume_session(project_path)
+            console.workflow_start("Resuming session")
+            results = await orchestrator.run()
+            console.workflow_complete("Session", results.get('final_summary', 'Done'))
+            return 0
+        except Exception as e:
+            console.error(f"Error resuming session: {e}")
+            return 1
+    
+    # If no request provided, show welcome and prompt for input
+    request = args.request
+    if not request:
+        request = show_welcome()
+        if not request:
+            return 0  # User cancelled
+        
+        # Check for special commands
+        if request.lower() in ['--help', '-h', 'help']:
+            parse_args()  # This will show help and exit
+            return 0
+        if request.lower() in ['--list-projects', '-l', 'list']:
+            list_projects()
+            return 0
+        if request.lower() in ['--interactive', '-i', 'interactive']:
+            await interactive_mode()
+            return 0
+    
+    # Run analysis
+    try:
+        print()  # Clean spacing before Bohr takes over
+        
+        results = await run_minilab(
+            request=request,
+            project_name=args.project,
+            workflow=args.workflow,
         )
-
-        print("\n" + "-" * 60)
-        print("Franklin:")
-        print("-" * 60)
-        print(result["pi_response"])
         
-        if result.get("tool_results"):
-            print("\n" + "-" * 60)
-            print("Tool Operations:")
-            print("-" * 60)
-            for tool_result in result["tool_results"]:
-                if tool_result.get("success"):
-                    print(f"✓ {tool_result.get('action', 'operation')} completed: {tool_result.get('path', '')}")
-                else:
-                    print(f"✗ Error: {tool_result.get('error', 'Unknown error')}")
+        print()
+        console.workflow_complete("Analysis", results.get('final_summary', 'Done'))
         
-        if result["consultations"]:
-            print("\n" + "-" * 60)
-            print(f"[Consulted with: {', '.join([agents[aid].display_name for aid in result['consultations']])}]")
-            print("-" * 60)
+        return 0
         
-        total_tokens += result["estimated_tokens"]
-        print(f"\n[Session tokens: ~{total_tokens:,} | Last query: ~{result['estimated_tokens']:,}]")
-        
-        # Store in history
-        conversation_history.append({
-            "user": user_prompt,
-            "response": result["pi_response"],
-            "consultations": result["consultations"],
-        })
+    except Exception as e:
+        console.error(str(e))
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
 
 
-async def main():
-    """Main menu loop."""
-    while True:
-        display_menu()
-        
-        choice = input("Enter your choice (1-3): ").strip()
-        
-        if choice == "1":
-            await run_single_analysis_mode()
-        elif choice == "2":
-            print("\n⚠️  Option 2 is not available. Please use option 1.")
-        elif choice == "3":
-            print("\nGoodbye!")
-            sys.exit(0)
-        else:
-            print("\n⚠️  Invalid choice. Please enter 1 or 3.")
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+    exit_code = asyncio.run(main_async(args))
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n\nInterrupted by user. Goodbye!")
-        sys.exit(0)
+    main()

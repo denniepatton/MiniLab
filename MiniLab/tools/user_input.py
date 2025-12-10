@@ -1,80 +1,171 @@
 """
-User Input Tool for MiniLab Agents
+User Input Tool for agent-user communication.
 
-Allows agents to directly ask the user for input and receive their response.
-This enables fully agentic workflows where the AGENT decides when to ask
-for user feedback, what to ask, and how to interpret the response.
+Allows agents to pause execution and request user input.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Optional, Callable
+from pydantic import Field
 
-from . import Tool
+from .base import Tool, ToolInput, ToolOutput, ToolError
+
+
+class AskInput(ToolInput):
+    """Input for asking the user a question."""
+    question: str = Field(..., description="The question to ask the user")
+    context: Optional[str] = Field(None, description="Additional context for the question")
+    choices: Optional[list[str]] = Field(None, description="If provided, user must select from these choices")
+    default: Optional[str] = Field(None, description="Default value if user provides no input")
+
+
+class ConfirmInput(ToolInput):
+    """Input for asking the user for confirmation."""
+    message: str = Field(..., description="The confirmation message")
+    default: bool = Field(True, description="Default value if user provides no input")
+
+
+class UserInputOutput(ToolOutput):
+    """Output for user input operations."""
+    response: Optional[str] = None
+    confirmed: Optional[bool] = None
 
 
 class UserInputTool(Tool):
     """
-    Tool for agents to request input from the user.
+    User interaction tool for agent-user communication.
     
-    The agent decides:
-    - WHEN to ask (at appropriate checkpoints)
-    - WHAT to ask (the question/prompt)
-    - HOW to interpret the response (agent's responsibility)
-    
-    The orchestrator does NOT interpret user input - it goes directly
-    to the agent who asked for it.
+    Allows agents to pause and request user input at any time.
+    This is the primary mechanism for agents to ask clarifying questions.
     """
-
-    def __init__(self):
-        super().__init__(
-            name="user_input",
-            description="""Ask the user for input and wait for their response.
-Action: ask
-Params: {prompt: "Your question to the user"}
-
-The user's response is returned exactly as typed. YOU (the agent) interpret it.
-Use this at checkpoints to confirm plans, get feedback, or ask clarifying questions.
-
-Example: {"tool": "user_input", "action": "ask", "params": {"prompt": "Does this project name work? (yes/no or suggest alternative)"}}"""
-        )
-
-    async def execute(self, action: str = "ask", **kwargs) -> Dict[str, Any]:
+    
+    name = "user_input"
+    description = "Ask the user questions or request confirmation"
+    
+    def __init__(
+        self,
+        agent_id: str,
+        input_callback: Optional[Callable[[str, Optional[list[str]]], str]] = None,
+        **kwargs
+    ):
         """
-        Ask the user for input.
+        Initialize user input tool.
         
         Args:
-            action: Should be "ask"
-            prompt: The question/prompt to show the user
-            
-        Returns:
-            Dict with user's response
+            agent_id: The ID of the agent using this tool
+            input_callback: Callback function to get user input
+                           Signature: (prompt, choices) -> response
         """
-        if action != "ask":
-            return {
-                "success": False,
-                "error": f"Unknown action: {action}. Use 'ask'.",
-            }
+        super().__init__(agent_id, **kwargs)
+        self.input_callback = input_callback
+    
+    def set_input_callback(self, callback: Callable[[str, Optional[list[str]]], str]) -> None:
+        """Set the input callback after initialization."""
+        self.input_callback = callback
+    
+    def get_actions(self) -> dict[str, str]:
+        return {
+            "ask": "Ask the user a question and wait for response",
+            "confirm": "Ask the user for yes/no confirmation",
+        }
+    
+    def get_input_schema(self, action: str) -> type[ToolInput]:
+        schemas = {
+            "ask": AskInput,
+            "confirm": ConfirmInput,
+        }
+        if action not in schemas:
+            raise ToolError(self.name, action, f"Unknown action: {action}")
+        return schemas[action]
+    
+    async def execute(self, action: str, params: dict[str, Any]) -> UserInputOutput:
+        """Execute a user input action."""
+        validated = self.validate_input(action, params)
         
-        prompt = kwargs.get("prompt", "Please provide input:")
-        
-        # Print the prompt and wait for input
-        print(f"\n  🗣️ Agent asks: {prompt}")
         try:
-            user_response = input("  > ").strip()
+            if action == "ask":
+                return await self._ask(validated)
+            elif action == "confirm":
+                return await self._confirm(validated)
+            else:
+                raise ToolError(self.name, action, f"Unknown action: {action}")
+        except Exception as e:
+            return UserInputOutput(success=False, error=f"Failed to get user input: {e}")
+    
+    async def _ask(self, params: AskInput) -> UserInputOutput:
+        """Ask the user a question."""
+        if not self.input_callback:
+            return UserInputOutput(
+                success=False,
+                error="No input callback configured - cannot interact with user"
+            )
+        
+        # Build prompt
+        prompt_parts = [f"[{self.agent_id.upper()}]: {params.question}"]
+        
+        if params.context:
+            prompt_parts.append(f"\nContext: {params.context}")
+        
+        if params.choices:
+            prompt_parts.append(f"\nOptions: {', '.join(params.choices)}")
+        
+        if params.default:
+            prompt_parts.append(f"\n(Default: {params.default})")
+        
+        prompt = "".join(prompt_parts)
+        
+        try:
+            response = self.input_callback(prompt, params.choices)
             
-            return {
-                "success": True,
-                "response": user_response,
-                "message": f"User responded: {user_response[:100]}{'...' if len(user_response) > 100 else ''}",
-            }
-        except EOFError:
-            return {
-                "success": False,
-                "error": "No input available (EOF)",
-            }
+            # Use default if no response
+            if not response and params.default:
+                response = params.default
+            
+            # Validate against choices if provided
+            if params.choices and response:
+                # Case-insensitive matching
+                matches = [c for c in params.choices if c.lower() == response.lower()]
+                if matches:
+                    response = matches[0]
+                else:
+                    return UserInputOutput(
+                        success=False,
+                        error=f"Invalid choice. Please select from: {', '.join(params.choices)}"
+                    )
+            
+            return UserInputOutput(success=True, response=response)
+            
         except KeyboardInterrupt:
-            return {
-                "success": False,
-                "error": "User cancelled input",
-            }
+            return UserInputOutput(
+                success=False,
+                error="User interrupted input"
+            )
+    
+    async def _confirm(self, params: ConfirmInput) -> UserInputOutput:
+        """Ask the user for confirmation."""
+        if not self.input_callback:
+            return UserInputOutput(
+                success=False,
+                error="No input callback configured - cannot interact with user"
+            )
+        
+        default_str = "Y/n" if params.default else "y/N"
+        prompt = f"[{self.agent_id.upper()}]: {params.message} [{default_str}]"
+        
+        try:
+            response = self.input_callback(prompt, None)
+            
+            if not response:
+                confirmed = params.default
+            else:
+                confirmed = response.lower() in ("y", "yes", "true", "1")
+            
+            return UserInputOutput(success=True, confirmed=confirmed, response=response)
+            
+        except KeyboardInterrupt:
+            return UserInputOutput(
+                success=False,
+                confirmed=False,
+                error="User interrupted input"
+            )

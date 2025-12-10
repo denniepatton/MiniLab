@@ -1,424 +1,423 @@
 """
-Citation Tool - Fetch and format academic citations with DOI links
+Citation Tool for bibliography management.
 
-This tool allows agents to:
-1. Fetch citation metadata from DOI
-2. Format citations in various styles
-3. Generate clickable DOI links
-4. Build bibliographies
+Provides citation formatting and DOI/PMID lookup.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass
-import urllib.parse
+from typing import Any, Optional
+import httpx
+from pydantic import Field
+
+from .base import Tool, ToolInput, ToolOutput, ToolError
 
 
-@dataclass
-class Citation:
-    """Structured citation data."""
+class FetchDOIInput(ToolInput):
+    """Input for fetching citation by DOI."""
+    doi: str = Field(..., description="Digital Object Identifier (e.g., '10.1038/nature12373')")
+
+
+class FetchPMIDInput(ToolInput):
+    """Input for fetching citation by PMID."""
+    pmid: str = Field(..., description="PubMed ID")
+
+
+class FormatCitationInput(ToolInput):
+    """Input for formatting a citation."""
+    citation: dict = Field(..., description="Citation data dictionary")
+    style: str = Field("nature", description="Citation style: 'nature', 'apa', 'mla', 'bibtex'")
+
+
+class CreateManualInput(ToolInput):
+    """Input for creating a manual citation entry."""
+    title: str = Field(..., description="Article/book title")
+    authors: list[str] = Field(..., description="List of author names")
+    year: Optional[int] = Field(None, description="Publication year")
+    journal: Optional[str] = Field(None, description="Journal name")
+    volume: Optional[str] = Field(None, description="Volume number")
+    pages: Optional[str] = Field(None, description="Page numbers")
+    doi: Optional[str] = Field(None, description="DOI if available")
+    pmid: Optional[str] = Field(None, description="PMID if available")
+    url: Optional[str] = Field(None, description="URL if available")
+
+
+class CitationOutput(ToolOutput):
+    """Output for citation operations."""
+    citation: Optional[dict] = None
+    formatted: Optional[str] = None
+    bibtex: Optional[str] = None
+
+
+class CitationTool(Tool):
+    """
+    Citation management tool.
     
-    title: str
-    authors: List[str]
-    year: Optional[int] = None
-    journal: Optional[str] = None
-    volume: Optional[str] = None
-    issue: Optional[str] = None
-    pages: Optional[str] = None
-    doi: Optional[str] = None
-    url: Optional[str] = None
-    pmid: Optional[str] = None
+    Supports:
+    - Fetching citation data from DOI or PMID
+    - Formatting citations in various styles
+    - Creating manual citation entries
+    """
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
+    name = "citation"
+    description = "Manage citations: fetch from DOI/PMID, format in various styles"
+    
+    def __init__(self, agent_id: str, **kwargs):
+        super().__init__(agent_id, **kwargs)
+    
+    def get_actions(self) -> dict[str, str]:
         return {
-            "title": self.title,
-            "authors": self.authors,
-            "year": self.year,
-            "journal": self.journal,
-            "volume": self.volume,
-            "issue": self.issue,
-            "pages": self.pages,
-            "doi": self.doi,
-            "url": self.url,
-            "pmid": self.pmid,
+            "fetch_doi": "Fetch citation data from a DOI",
+            "fetch_pmid": "Fetch citation data from a PubMed ID",
+            "format": "Format a citation in a specific style",
+            "create_manual": "Create a manual citation entry",
         }
-
-
-class CitationTool:
-    """
-    Tool for fetching and formatting academic citations.
     
-    Note: This is a basic implementation. For production use, integrate with
-    APIs like CrossRef, PubMed, or services like Zotero.
-    """
+    def get_input_schema(self, action: str) -> type[ToolInput]:
+        schemas = {
+            "fetch_doi": FetchDOIInput,
+            "fetch_pmid": FetchPMIDInput,
+            "format": FormatCitationInput,
+            "create_manual": CreateManualInput,
+        }
+        if action not in schemas:
+            raise ToolError(self.name, action, f"Unknown action: {action}")
+        return schemas[action]
     
-    def __init__(self):
-        self.citations: Dict[str, Citation] = {}  # Cache by DOI
-    
-    async def execute(self, action: str, **params) -> Dict[str, Any]:
-        """
-        Execute a citation operation.
+    async def execute(self, action: str, params: dict[str, Any]) -> CitationOutput:
+        """Execute a citation action."""
+        validated = self.validate_input(action, params)
         
-        Actions:
-            - fetch_from_doi: Fetch citation from DOI
-            - fetch_from_pmid: Fetch citation from PubMed ID
-            - format_citation: Format a citation in specified style
-            - format_bibliography: Format multiple citations as bibliography
-            - create_manual: Create a citation manually
-        """
         try:
-            if action == "fetch_from_doi":
-                return await self._fetch_from_doi(params.get("doi"))
-            
-            elif action == "fetch_from_pmid":
-                return await self._fetch_from_pmid(params.get("pmid"))
-            
-            elif action == "format_citation":
-                return self._format_citation(
-                    params.get("doi"),
-                    params.get("style", "apa")
-                )
-            
-            elif action == "format_bibliography":
-                return self._format_bibliography(
-                    params.get("dois", []),
-                    params.get("style", "apa")
-                )
-            
+            if action == "fetch_doi":
+                return await self._fetch_doi(validated)
+            elif action == "fetch_pmid":
+                return await self._fetch_pmid(validated)
+            elif action == "format":
+                return await self._format(validated)
             elif action == "create_manual":
-                return self._create_manual_citation(params)
-            
+                return await self._create_manual(validated)
             else:
-                return {
-                    "success": False,
-                    "error": f"Unknown action: {action}",
-                }
-        
+                raise ToolError(self.name, action, f"Unknown action: {action}")
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return CitationOutput(success=False, error=f"Citation operation failed: {e}")
     
-    async def _fetch_from_doi(self, doi: str) -> Dict[str, Any]:
-        """
-        Fetch citation from DOI.
+    async def _fetch_doi(self, params: FetchDOIInput) -> CitationOutput:
+        """Fetch citation data from CrossRef using DOI."""
+        doi = params.doi.strip()
         
-        Note: This is a placeholder. In production, use CrossRef API:
-        https://api.crossref.org/works/{doi}
-        """
-        if not doi:
-            return {
-                "success": False,
-                "error": "DOI is required",
-            }
+        # Normalize DOI
+        if doi.startswith("https://doi.org/"):
+            doi = doi[16:]
+        elif doi.startswith("http://doi.org/"):
+            doi = doi[15:]
+        elif doi.startswith("doi:"):
+            doi = doi[4:]
         
-        # Clean DOI
-        doi = doi.strip()
-        if doi.startswith("http"):
-            # Extract DOI from URL
-            match = re.search(r"10\.\d{4,}/[^\s]+", doi)
-            if match:
-                doi = match.group(0)
-        
-        # Check cache
-        if doi in self.citations:
-            citation = self.citations[doi]
-            return {
-                "success": True,
-                "citation": citation.to_dict(),
-                "formatted_apa": self._format_apa(citation),
-                "doi_link": f"https://doi.org/{doi}",
-                "source": "cache",
-            }
-        
-        # In a real implementation, fetch from CrossRef API here
-        # For now, return a placeholder
-        return {
-            "success": False,
-            "error": "Citation fetching not yet implemented. Use 'create_manual' action to add citations manually.",
-            "doi": doi,
-            "doi_link": f"https://doi.org/{doi}",
-            "instructions": {
-                "action": "create_manual",
-                "params": {
-                    "doi": doi,
-                    "title": "Article Title",
-                    "authors": ["Last, F. M.", "Last2, F. M."],
-                    "year": 2024,
-                    "journal": "Journal Name",
-                    "volume": "1",
-                    "issue": "1",
-                    "pages": "1-10",
-                },
-            },
-        }
-    
-    async def _fetch_from_pmid(self, pmid: str) -> Dict[str, Any]:
-        """
-        Fetch citation from PubMed ID.
-        
-        Note: This is a placeholder. In production, use PubMed E-utilities:
-        https://eutils.ncbi.nlm.nih.gov/entrez/eutils/
-        """
-        if not pmid:
-            return {
-                "success": False,
-                "error": "PMID is required",
-            }
-        
-        pmid = pmid.strip()
-        
-        return {
-            "success": False,
-            "error": "PubMed fetching not yet implemented. Use 'create_manual' action to add citations manually.",
-            "pmid": pmid,
-            "pubmed_link": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            "instructions": {
-                "action": "create_manual",
-                "params": {
-                    "pmid": pmid,
-                    "title": "Article Title",
-                    "authors": ["Last, F. M.", "Last2, F. M."],
-                    "year": 2024,
-                    "journal": "Journal Name",
-                    "volume": "1",
-                    "issue": "1",
-                    "pages": "1-10",
-                },
-            },
-        }
-    
-    def _create_manual_citation(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a citation manually from provided metadata."""
-        required = ["title", "authors"]
-        missing = [field for field in required if not params.get(field)]
-        
-        if missing:
-            return {
-                "success": False,
-                "error": f"Missing required fields: {', '.join(missing)}",
-            }
-        
-        citation = Citation(
-            title=params["title"],
-            authors=params["authors"] if isinstance(params["authors"], list) else [params["authors"]],
-            year=params.get("year"),
-            journal=params.get("journal"),
-            volume=params.get("volume"),
-            issue=params.get("issue"),
-            pages=params.get("pages"),
-            doi=params.get("doi"),
-            url=params.get("url"),
-            pmid=params.get("pmid"),
-        )
-        
-        # Cache by DOI if available
-        if citation.doi:
-            self.citations[citation.doi] = citation
-        
-        return {
-            "success": True,
-            "citation": citation.to_dict(),
-            "formatted_apa": self._format_apa(citation),
-            "doi_link": f"https://doi.org/{citation.doi}" if citation.doi else None,
-            "pubmed_link": f"https://pubmed.ncbi.nlm.nih.gov/{citation.pmid}/" if citation.pmid else None,
-        }
-    
-    def _format_citation(self, doi: str, style: str = "apa") -> Dict[str, Any]:
-        """Format a citation in specified style."""
-        if doi not in self.citations:
-            return {
-                "success": False,
-                "error": f"Citation not found: {doi}. Fetch it first.",
-            }
-        
-        citation = self.citations[doi]
-        
-        if style == "apa":
-            formatted = self._format_apa(citation)
-        elif style == "mla":
-            formatted = self._format_mla(citation)
-        elif style == "chicago":
-            formatted = self._format_chicago(citation)
-        else:
-            return {
-                "success": False,
-                "error": f"Unknown citation style: {style}. Supported: apa, mla, chicago",
-            }
-        
-        return {
-            "success": True,
-            "formatted": formatted,
-            "doi_link": f"https://doi.org/{citation.doi}" if citation.doi else None,
-        }
-    
-    def _format_bibliography(self, dois: List[str], style: str = "apa") -> Dict[str, Any]:
-        """Format multiple citations as a bibliography."""
-        if not dois:
-            return {
-                "success": False,
-                "error": "No DOIs provided",
-            }
-        
-        formatted_citations = []
-        missing_dois = []
-        
-        for doi in dois:
-            if doi in self.citations:
-                citation = self.citations[doi]
-                if style == "apa":
-                    formatted = self._format_apa(citation)
-                elif style == "mla":
-                    formatted = self._format_mla(citation)
-                elif style == "chicago":
-                    formatted = self._format_chicago(citation)
-                else:
-                    formatted = str(citation)
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Use CrossRef API
+            url = f"https://api.crossref.org/works/{doi}"
+            headers = {"Accept": "application/json"}
+            
+            try:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
                 
-                formatted_citations.append(formatted)
-            else:
-                missing_dois.append(doi)
+                data = response.json()
+                work = data.get("message", {})
+                
+                citation = {
+                    "doi": doi,
+                    "title": work.get("title", [""])[0],
+                    "authors": [],
+                    "journal": work.get("container-title", [""])[0],
+                    "year": None,
+                    "volume": work.get("volume"),
+                    "issue": work.get("issue"),
+                    "pages": work.get("page"),
+                    "url": f"https://doi.org/{doi}",
+                }
+                
+                # Parse authors
+                for author in work.get("author", []):
+                    given = author.get("given", "")
+                    family = author.get("family", "")
+                    if family:
+                        citation["authors"].append(f"{family}, {given}".strip(", "))
+                
+                # Parse date
+                date_parts = work.get("published-print", {}).get("date-parts", [[]])
+                if not date_parts[0]:
+                    date_parts = work.get("published-online", {}).get("date-parts", [[]])
+                if date_parts[0]:
+                    citation["year"] = date_parts[0][0]
+                
+                return CitationOutput(
+                    success=True,
+                    citation=citation,
+                    formatted=self._format_nature(citation),
+                )
+                
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    return CitationOutput(
+                        success=False,
+                        error=f"DOI not found: {doi}"
+                    )
+                raise
+    
+    async def _fetch_pmid(self, params: FetchPMIDInput) -> CitationOutput:
+        """Fetch citation data from PubMed using PMID."""
+        from .pubmed import PubMedTool, FetchInput
         
-        if missing_dois:
-            return {
-                "success": False,
-                "error": f"Some citations not found: {', '.join(missing_dois)}",
-                "formatted_count": len(formatted_citations),
-            }
+        # Use PubMed tool to fetch
+        pubmed = PubMedTool(self.agent_id)
+        result = await pubmed._fetch(FetchInput(pmids=[params.pmid], include_abstract=False))
         
-        # Sort alphabetically by first author's last name
-        formatted_citations.sort()
+        if not result.success or not result.articles:
+            return CitationOutput(
+                success=False,
+                error=f"PMID not found: {params.pmid}"
+            )
         
-        bibliography = "\n\n".join(formatted_citations)
+        article = result.articles[0]
         
-        return {
-            "success": True,
-            "bibliography": bibliography,
-            "count": len(formatted_citations),
-            "style": style,
+        citation = {
+            "pmid": params.pmid,
+            "title": article.get("title", ""),
+            "authors": article.get("authors", []),
+            "journal": article.get("journal", ""),
+            "year": None,
+            "doi": article.get("doi"),
+            "url": article.get("url"),
         }
+        
+        # Parse year from date
+        date = article.get("date", "")
+        if date:
+            year_match = re.search(r"\d{4}", date)
+            if year_match:
+                citation["year"] = int(year_match.group())
+        
+        return CitationOutput(
+            success=True,
+            citation=citation,
+            formatted=self._format_nature(citation),
+        )
     
-    def _format_apa(self, citation: Citation) -> str:
-        """Format citation in APA style."""
-        # Authors
-        if len(citation.authors) == 1:
-            authors = citation.authors[0]
-        elif len(citation.authors) == 2:
-            authors = f"{citation.authors[0]} & {citation.authors[1]}"
+    async def _format(self, params: FormatCitationInput) -> CitationOutput:
+        """Format a citation in a specific style."""
+        citation = params.citation
+        
+        if params.style == "nature":
+            formatted = self._format_nature(citation)
+        elif params.style == "apa":
+            formatted = self._format_apa(citation)
+        elif params.style == "mla":
+            formatted = self._format_mla(citation)
+        elif params.style == "bibtex":
+            formatted = self._format_bibtex(citation)
         else:
-            authors = ", ".join(citation.authors[:-1]) + f", & {citation.authors[-1]}"
+            return CitationOutput(
+                success=False,
+                error=f"Unknown citation style: {params.style}"
+            )
         
-        # Year
-        year = f"({citation.year})" if citation.year else "(n.d.)"
-        
-        # Title
-        title = citation.title.rstrip(".")
-        
-        # Journal info
-        journal_info = ""
-        if citation.journal:
-            journal_info = f"*{citation.journal}*"
-            if citation.volume:
-                journal_info += f", *{citation.volume}*"
-            if citation.issue:
-                journal_info += f"({citation.issue})"
-            if citation.pages:
-                journal_info += f", {citation.pages}"
-        
-        # DOI or URL
-        link = ""
-        if citation.doi:
-            link = f"https://doi.org/{citation.doi}"
-        elif citation.url:
-            link = citation.url
-        
-        # Assemble
-        parts = [authors, year, title]
-        if journal_info:
-            parts.append(journal_info)
-        if link:
-            parts.append(link)
-        
-        return f"{parts[0]} {parts[1]}. {parts[2]}. " + ". ".join(parts[3:]) + "."
+        return CitationOutput(
+            success=True,
+            citation=citation,
+            formatted=formatted,
+            bibtex=self._format_bibtex(citation) if params.style != "bibtex" else None,
+        )
     
-    def _format_mla(self, citation: Citation) -> str:
-        """Format citation in MLA style."""
-        # First author (Last, First)
-        if citation.authors:
-            first_author = citation.authors[0]
-            if len(citation.authors) > 1:
-                authors = f"{first_author}, et al."
+    async def _create_manual(self, params: CreateManualInput) -> CitationOutput:
+        """Create a manual citation entry."""
+        citation = {
+            "title": params.title,
+            "authors": params.authors,
+            "year": params.year,
+            "journal": params.journal,
+            "volume": params.volume,
+            "pages": params.pages,
+            "doi": params.doi,
+            "pmid": params.pmid,
+            "url": params.url,
+        }
+        
+        return CitationOutput(
+            success=True,
+            citation=citation,
+            formatted=self._format_nature(citation),
+            bibtex=self._format_bibtex(citation),
+        )
+    
+    def _format_nature(self, citation: dict) -> str:
+        """Format citation in Nature style."""
+        parts = []
+        
+        # Authors
+        authors = citation.get("authors", [])
+        if authors:
+            if len(authors) > 3:
+                parts.append(f"{authors[0]} et al.")
             else:
-                authors = first_author
-        else:
-            authors = "Unknown"
+                parts.append(", ".join(authors))
         
         # Title
-        title = f'"{citation.title}"'
+        title = citation.get("title", "")
+        if title:
+            parts.append(title)
         
-        # Journal
-        journal = f"*{citation.journal}*" if citation.journal else ""
+        # Journal, volume, pages (year)
+        journal_parts = []
+        if citation.get("journal"):
+            journal_parts.append(f"*{citation['journal']}*")
+        if citation.get("volume"):
+            journal_parts.append(f"**{citation['volume']}**")
+        if citation.get("pages"):
+            journal_parts.append(citation["pages"])
         
-        # Volume/Issue
-        vol_issue = ""
-        if citation.volume:
-            vol_issue = f"vol. {citation.volume}"
-            if citation.issue:
-                vol_issue += f", no. {citation.issue}"
+        if journal_parts:
+            journal_str = " ".join(journal_parts)
+            if citation.get("year"):
+                journal_str += f" ({citation['year']})"
+            parts.append(journal_str)
+        elif citation.get("year"):
+            parts.append(f"({citation['year']})")
         
-        # Year
-        year = str(citation.year) if citation.year else "n.d."
+        result = ". ".join(parts)
         
-        # Pages
-        pages = f"pp. {citation.pages}" if citation.pages else ""
-        
-        # DOI
-        doi = f"https://doi.org/{citation.doi}" if citation.doi else ""
-        
-        # Assemble
-        parts = [p for p in [authors, title, journal, vol_issue, year, pages, doi] if p]
-        return ", ".join(parts) + "."
-    
-    def _format_chicago(self, citation: Citation) -> str:
-        """Format citation in Chicago style."""
-        # Authors
-        if len(citation.authors) == 1:
-            authors = citation.authors[0]
-        elif len(citation.authors) == 2:
-            authors = f"{citation.authors[0]} and {citation.authors[1]}"
-        elif len(citation.authors) == 3:
-            authors = f"{citation.authors[0]}, {citation.authors[1]}, and {citation.authors[2]}"
-        else:
-            authors = f"{citation.authors[0]} et al."
-        
-        # Title
-        title = f'"{citation.title}"'
-        
-        # Journal
-        journal = f"*{citation.journal}*" if citation.journal else ""
-        
-        # Volume/Issue
-        vol_issue = ""
-        if citation.volume:
-            vol_issue = citation.volume
-            if citation.issue:
-                vol_issue += f", no. {citation.issue}"
-        
-        # Year and pages
-        year = f"({citation.year})" if citation.year else ""
-        pages = citation.pages if citation.pages else ""
-        
-        # DOI
-        doi = f"https://doi.org/{citation.doi}" if citation.doi else ""
-        
-        # Assemble
-        parts = [p for p in [authors, title, journal, vol_issue, year, pages] if p]
-        result = ". ".join(parts) + "."
-        if doi:
-            result += f" {doi}."
+        # Add DOI link
+        if citation.get("doi"):
+            result += f" https://doi.org/{citation['doi']}"
+        elif citation.get("url"):
+            result += f" {citation['url']}"
         
         return result
+    
+    def _format_apa(self, citation: dict) -> str:
+        """Format citation in APA style."""
+        parts = []
+        
+        # Authors
+        authors = citation.get("authors", [])
+        if authors:
+            formatted_authors = []
+            for author in authors[:6]:
+                if ", " in author:
+                    parts_split = author.split(", ")
+                    formatted_authors.append(f"{parts_split[0]}, {parts_split[1][0]}.")
+                else:
+                    formatted_authors.append(author)
+            
+            if len(authors) > 6:
+                formatted_authors.append("...")
+                formatted_authors.append(authors[-1])
+            
+            parts.append(", ".join(formatted_authors[:-1]) + ", & " + formatted_authors[-1] if len(formatted_authors) > 1 else formatted_authors[0])
+        
+        # Year
+        if citation.get("year"):
+            parts.append(f"({citation['year']})")
+        
+        # Title
+        if citation.get("title"):
+            parts.append(citation["title"])
+        
+        # Journal
+        if citation.get("journal"):
+            journal_str = f"*{citation['journal']}*"
+            if citation.get("volume"):
+                journal_str += f", *{citation['volume']}*"
+            if citation.get("pages"):
+                journal_str += f", {citation['pages']}"
+            parts.append(journal_str)
+        
+        result = " ".join(parts)
+        
+        if citation.get("doi"):
+            result += f" https://doi.org/{citation['doi']}"
+        
+        return result
+    
+    def _format_mla(self, citation: dict) -> str:
+        """Format citation in MLA style."""
+        parts = []
+        
+        # Authors
+        authors = citation.get("authors", [])
+        if authors:
+            if len(authors) == 1:
+                parts.append(authors[0])
+            elif len(authors) == 2:
+                parts.append(f"{authors[0]}, and {authors[1]}")
+            else:
+                parts.append(f"{authors[0]}, et al")
+        
+        # Title
+        if citation.get("title"):
+            parts.append(f'"{citation["title"]}"')
+        
+        # Journal
+        if citation.get("journal"):
+            parts.append(f"*{citation['journal']}*")
+        
+        # Volume, year, pages
+        details = []
+        if citation.get("volume"):
+            details.append(f"vol. {citation['volume']}")
+        if citation.get("year"):
+            details.append(str(citation["year"]))
+        if citation.get("pages"):
+            details.append(f"pp. {citation['pages']}")
+        
+        if details:
+            parts.append(", ".join(details))
+        
+        return ". ".join(parts) + "."
+    
+    def _format_bibtex(self, citation: dict) -> str:
+        """Format citation as BibTeX entry."""
+        # Generate key
+        first_author = citation.get("authors", ["unknown"])[0]
+        if ", " in first_author:
+            last_name = first_author.split(", ")[0]
+        else:
+            last_name = first_author.split()[-1] if first_author else "unknown"
+        
+        year = citation.get("year", "")
+        title_word = citation.get("title", "untitled").split()[0].lower() if citation.get("title") else "untitled"
+        key = f"{last_name.lower()}{year}{title_word}"
+        key = re.sub(r"[^a-z0-9]", "", key)
+        
+        lines = [f"@article{{{key},"]
+        
+        if citation.get("authors"):
+            authors_str = " and ".join(citation["authors"])
+            lines.append(f'  author = {{{authors_str}}},')
+        
+        if citation.get("title"):
+            lines.append(f'  title = {{{citation["title"]}}},')
+        
+        if citation.get("journal"):
+            lines.append(f'  journal = {{{citation["journal"]}}},')
+        
+        if citation.get("year"):
+            lines.append(f'  year = {{{citation["year"]}}},')
+        
+        if citation.get("volume"):
+            lines.append(f'  volume = {{{citation["volume"]}}},')
+        
+        if citation.get("pages"):
+            lines.append(f'  pages = {{{citation["pages"]}}},')
+        
+        if citation.get("doi"):
+            lines.append(f'  doi = {{{citation["doi"]}}},')
+        
+        if citation.get("pmid"):
+            lines.append(f'  pmid = {{{citation["pmid"]}}},')
+        
+        lines.append("}")
+        
+        return "\n".join(lines)

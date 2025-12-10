@@ -57,7 +57,6 @@ Sandbox/*
 .coverage
 htmlcov/
 .tox/
-/ReadData/**
 
 # Documentation
 docs/_build/

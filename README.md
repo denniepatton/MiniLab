@@ -4,28 +4,72 @@
 
 ## Key Features
 
-- **9 Specialized Agents** with distinct personas but equal capabilities
+- **9 Specialized Agents** with distinct personas and SOTA role-specific prompting
 - **TRUE Agentic Execution**: Agents use tools autonomously in a ReAct-style loop
-- **Universal Tool Access**: All agents can read/write files, edit code, search the web, run terminal commands
-- **Cross-Agent Collaboration**: Any agent can consult any other agent in real-time
-- **Dual-Mode Filesystem**: ReadData/ (read-only) + Sandbox/ (read-write) for safe data handling
+- **Modular Workflow System**: 6 composable mini-workflows for flexible pipelines
+- **RAG-Based Context**: FAISS vector store with semantic + recency retrieval
+- **Security-First**: PathGuard enforces read-only data, write-only sandbox
+- **Web & Literature Search**: Tavily web search, PubMed, and arXiv integration
+- **Cross-Agent Collaboration**: Open dialogue protocol for multi-agent deliberation
 - **Comprehensive Logging**: Full transcripts with timestamps and token tracking
+
+## Architecture (v0.2)
+
+```
+MiniLab/
+├── security/              # PathGuard access control
+│   └── path_guard.py      # Read/write validation, agent permissions
+├── tools/                 # Typed tool system
+│   ├── base.py            # Tool, ToolInput, ToolOutput with Pydantic
+│   ├── filesystem.py      # File operations with security
+│   ├── code_editor.py     # Code creation and editing
+│   ├── terminal.py        # Shell command execution
+│   ├── web_search.py      # Tavily API integration
+│   ├── pubmed.py          # NCBI E-utilities search
+│   ├── arxiv.py           # arXiv paper search
+│   └── citation.py        # Bibliography management
+├── context/               # RAG-based context management
+│   ├── context_manager.py # Orchestrates context building
+│   ├── embeddings.py      # sentence-transformers integration
+│   ├── vector_store.py    # FAISS vector store
+│   └── state_objects.py   # ProjectState, TaskState, etc.
+├── agents/                # SOTA agent system
+│   ├── base.py            # Agent with ReAct loop
+│   ├── prompts.py         # 5-part prompt schema
+│   └── registry.py        # Agent creation and lookup
+├── workflows/             # Modular workflow components
+│   ├── base.py            # WorkflowModule ABC
+│   ├── consultation.py    # User goal clarification
+│   ├── literature_review.py  # Background research
+│   ├── planning_committee.py # Multi-agent deliberation
+│   ├── execute_analysis.py   # Dayhoff→Hinton→Bayes loop
+│   ├── writeup_results.py    # Documentation
+│   └── critical_review.py    # Quality assessment
+├── orchestrators/         # High-level orchestration
+│   └── bohr_orchestrator.py  # Workflow selection & coordination
+├── llm_backends/          # LLM integrations
+│   └── anthropic_backend.py  # Claude API
+├── utils/                 # Utilities
+│   └── __init__.py        # Console output formatting
+└── config/                # Configuration
+    └── agents.yaml        # Agent personas
+```
 
 ## Agent Team
 
-All agents use **Claude Sonnet 4** via Anthropic API and share the same tool capabilities. They differ only in their personas and specialized roles:
+All agents use **Claude Sonnet 4** via Anthropic API with SOTA role-specific prompting:
 
-| Agent | Role | Specialty |
-|-------|------|-----------|
-| **Bohr** | Project Lead | Coordination, integration, decision-making |
-| **Farber** | Critical Reviewer | Clinical relevance, feasibility, catching errors |
-| **Gould** | Librarian & Writer | Literature review, citations, figure legends, summaries |
-| **Feynman** | Creative Theorist | Naive questions, unconventional approaches, physics analogies |
-| **Shannon** | Methodologist | Experimental design, causality, statistical methods |
-| **Greider** | Biological Expert | Molecular mechanisms, biological plausibility |
-| **Bayes** | Statistician | Statistical analysis, clinical trial design |
-| **Hinton** | Primary Coder | Script development, debugging, code execution |
-| **Dayhoff** | Analysis Architect | Translating plans into executable analyses |
+| Agent | Guild | Specialty |
+|-------|-------|-----------|
+| **Bohr** | Orchestration | Project coordination, user interaction, workflow selection |
+| **Gould** | Synthesis | Literature review, citations, documentation, writing |
+| **Farber** | Synthesis | Critical review, clinical relevance, quality assessment |
+| **Feynman** | Theory | Creative problem-solving, naive questions, analogies |
+| **Shannon** | Theory | Experimental design, information theory, methodology |
+| **Greider** | Theory | Biological mechanisms, molecular interpretation |
+| **Dayhoff** | Implementation | Bioinformatics workflows, data preparation |
+| **Hinton** | Implementation | Code development, debugging, execution |
+| **Bayes** | Implementation | Statistical validation, uncertainty quantification |
 
 ## Installation
 
@@ -34,7 +78,7 @@ All agents use **Claude Sonnet 4** via Anthropic API and share the same tool cap
 - **macOS** (or Linux)
 - **micromamba** (or conda/mamba)
 - **Python 3.11+**
-- **Anthropic API Key**
+- **API Keys**: Anthropic (required), Tavily (optional), NCBI (optional)
 
 ### Setup
 
@@ -50,147 +94,93 @@ micromamba activate minilab
 # Install in development mode
 pip install -e .
 
-# Configure API key
-echo "ANTHROPIC_API_KEY=your_key_here" > .env
+# Configure environment
+cat > .env << EOF
+ANTHROPIC_API_KEY=your_key_here
+TAVILY_API_KEY=optional_for_web_search
+NCBI_EMAIL=your_email_for_pubmed
+NCBI_API_KEY=optional_for_higher_rate_limits
+EOF
 
 # Verify installation
-python -c "from MiniLab import load_agents; print('✓ MiniLab ready')"
+python -c "from MiniLab import run_minilab; print('✓ MiniLab ready')"
 ```
 
 ## Quick Start
 
-### Run Single Analysis Workflow
+### Command Line Interface
 
 ```bash
-python scripts/run_single_analysis.py
+# Start a new analysis
+python scripts/minilab.py "Analyze the Pluvicto genomic data for treatment response predictors"
+
+# Specify workflow explicitly
+python scripts/minilab.py "What is the state of the art in cfDNA analysis?" --workflow literature_review
+
+# Resume an existing project
+python scripts/minilab.py --resume Sandbox/pluvicto_analysis
+
+# Interactive mode
+python scripts/minilab.py --interactive
+
+# List existing projects
+python scripts/minilab.py --list-projects
 ```
 
-This launches the comprehensive 7-stage research workflow:
+### Python API
 
-1. **Stage 0**: Confirm files and project naming
-2. **Stage 1**: Build project structure, summarize data
-3. **Stage 2**: Plan analysis (Synthesis → Theory → Implementation cores)
-4. **Stage 3**: Exploratory execution (if needed)
-5. **Stage 4**: Complete execution with iterative debugging
-6. **Stage 5**: Write-up (legends, summary with citations)
-7. **Stage 6**: Critical review
+```python
+import asyncio
+from MiniLab import run_minilab
 
-**Primary Outputs** (saved to `Sandbox/ProjectName/`):
-- `ProjectName_figures.pdf` - 4-6 panel Nature-style figure
-- `ProjectName_legends.md` - Figure legends
-- `ProjectName_summary.md` - Mini-paper with citations
+async def main():
+    results = await run_minilab(
+        request="Analyze the genomic features predictive of Pluvicto response",
+        project_name="pluvicto_analysis",
+        workflow="start_project",  # Optional: auto-detected if omitted
+    )
+    print(results["final_summary"])
 
-### Interactive Mode
-
-```bash
-python scripts/minilab.py
+asyncio.run(main())
 ```
 
-Select from menu options for different interaction modes.
+## Workflows
 
-## Architecture
+### Major Workflows (User-Facing)
 
-```
-MiniLab/
-├── agents/
-│   ├── base.py           # Agent class with agentic_execute() ReAct loop
-│   └── registry.py       # Loads agents from YAML config
-├── config/
-│   └── agents.yaml       # Agent personas and shared tool definitions
-├── orchestrators/
-│   ├── single_analysis.py  # 7-stage research workflow
-│   └── meetings.py         # PI-coordinated team meetings
-├── tools/
-│   ├── filesystem_dual.py  # ReadData (RO) + Sandbox (RW)
-│   ├── code_editor.py      # Incremental code building (10 actions)
-│   ├── web_search.py       # Web, PubMed, arXiv search
-│   ├── environment.py      # Package management with approval
-│   └── system_tools.py     # Terminal and Git access
-├── storage/
-│   ├── state_store.py      # Project persistence
-│   └── transcript.py       # Conversation logging
-└── llm_backends/
-    └── anthropic_backend.py  # Claude API integration
-```
+| Workflow | Description | Mini-Workflows Used |
+|----------|-------------|---------------------|
+| `brainstorming` | Explore ideas and approaches | Consultation → Planning Committee |
+| `literature_review` | Background research | Consultation → Literature Review |
+| `start_project` | Full analysis pipeline | All 6 modules in sequence |
+| `work_on_existing` | Continue existing project | Consultation → Planning → Execute → Writeup → Review |
+| `explore_dataset` | Data exploration focus | Consultation → Execute → Writeup |
 
-## Core Concepts
+### Mini-Workflow Modules
 
-### Agentic Execution
+1. **CONSULTATION** - User discussion and requirement gathering (Bohr lead)
+2. **LITERATURE REVIEW** - PubMed/arXiv search and synthesis (Gould lead)
+3. **PLANNING COMMITTEE** - Multi-agent deliberation on approach (Open dialogue)
+4. **EXECUTE ANALYSIS** - Dayhoff→Hinton→Bayes implementation loop
+5. **WRITE-UP RESULTS** - Documentation and reporting (Gould lead)
+6. **CRITICAL REVIEW** - Quality assessment and recommendations (Farber lead)
 
-Agents operate in a **ReAct-style loop** (`agentic_execute`):
+## Security Model
 
-1. **Think** about the task
-2. **Use a tool** (filesystem, code_editor, web_search, etc.)
-3. **Observe** the result
-4. **Continue** until task is complete or ask a colleague for help
+MiniLab enforces strict file access control via **PathGuard**:
 
-```
-# Tool call format (triple-backtick blocks)
-```tool
-{"tool": "filesystem", "action": "list", "params": {"path": "ReadData/"}}
-```
+| Directory | Access | Purpose |
+|-----------|--------|---------|
+| `ReadData/` | **Read-only** | Protected input data (no writes allowed) |
+| `Sandbox/` | **Read-write** | Project outputs, scripts, results |
+| Other paths | **Blocked** | Cannot access files outside workspace |
 
-# Colleague consultation format
-```colleague
-{"colleague": "hinton", "question": "Can you write a script to load this data?"}
-```
-
-# Completion signal
-```done
-{"result": "Analysis complete", "outputs": ["analysis.pdf"]}
-```
-```
-
-### Shared Context
-
-All agents receive comprehensive context including:
-- Project name and research question
-- Data file inventory
-- Current working plan
-- Execution plan
-- Previous results
-
-This prevents hallucination by ensuring agents know what actually exists.
-
-### Tool Capabilities
-
-All agents have access to:
-
-| Tool | Description |
-|------|-------------|
-| `filesystem` | Read/write files, list directories, create folders |
-| `code_editor` | Create, view, edit, run Python scripts incrementally |
-| `web_search` | Search the web for information |
-| `terminal` | Run shell commands |
-| `environment` | Check/install packages (with user approval) |
+Additional protections:
+- Path traversal (`../`) blocked
+- Agent-specific permission levels
+- Audit logging for all file operations
 
 ## Configuration
-
-### agents.yaml
-
-All agents share the same tools via YAML anchors:
-
-```yaml
-default_tools: &default_tools
-  - filesystem
-  - code_editor
-  - web_search
-  - terminal
-  - environment
-
-agents:
-  bohr:
-    backend: "anthropic:claude-sonnet-4-5"
-    tools: *default_tools
-    persona: |
-      You are Bohr, the project lead...
-  
-  hinton:
-    backend: "anthropic:claude-sonnet-4-5"
-    tools: *default_tools
-    persona: |
-      You are Hinton, the primary coder...
-```
 
 ### Environment Variables
 
@@ -198,68 +188,101 @@ agents:
 # Required
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Optional
-TAVILY_API_KEY=...       # Enhanced web search
-NCBI_EMAIL=...           # PubMed API
+# Optional - Web Search
+TAVILY_API_KEY=tvly-...
+
+# Optional - PubMed (higher rate limits)
+NCBI_EMAIL=your@email.com
+NCBI_API_KEY=...
+
+# Optional - Custom paths
+MINILAB_SANDBOX=/path/to/custom/sandbox
 ```
 
-## Data Directories
+### pyproject.toml Dependencies
 
-| Directory | Access | Purpose |
-|-----------|--------|---------|
-| `ReadData/` | Read-only | Protected input data |
-| `Sandbox/` | Read-write | Project outputs, scripts, scratch files |
-| `Transcripts/` | Auto-generated | Conversation logs |
-
-## Security
-
-- **Filesystem sandboxing**: Agents cannot access files outside workspace
-- **ReadData protection**: Input data is read-only
-- **Package approval**: Non-common packages require user confirmation
-- **Path validation**: No directory traversal (`../`) allowed
+```toml
+dependencies = [
+    "anthropic>=0.50.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0.0",
+    "sentence-transformers>=2.2.0",
+    "faiss-cpu>=1.7.0",
+    "tavily-python>=0.3.0",
+    "aiofiles>=23.0.0",
+]
+```
 
 ## Development
 
 ### Running Tests
 
 ```bash
-micromamba run -n minilab python -m pytest tests/
+# Run all tests
+micromamba run -n minilab python -m pytest tests/ -v
+
+# Run specific test file
+python -m pytest tests/test_smoke.py -v
+
+# Run with coverage
+python -m pytest tests/ --cov=MiniLab --cov-report=html
 ```
 
-### Code Structure Verification
+### Project Structure Verification
 
-```bash
-python -c "
-from MiniLab.orchestrators.single_analysis import run_single_analysis
-from MiniLab.agents.base import Agent
-print('agentic_execute:', hasattr(Agent, 'agentic_execute'))
-print('All systems operational')
-"
+```python
+from MiniLab import (
+    run_minilab,
+    BohrOrchestrator,
+    PathGuard,
+    Agent,
+    WorkflowModule,
+    console,
+)
+print("✓ All imports successful")
+```
+
+## Context System
+
+MiniLab uses a structured context approach:
+
+1. **Static Header** - Agent persona, role, objective, tools documentation
+2. **Rolling Task State** - ~1000 tokens, compressed via summarization
+3. **RAG Retrieval** - Semantic + recency weighted chunks from FAISS
+4. **Canonical State Objects** - Structured project/task state
+
+```python
+from MiniLab import ContextManager, ProjectState
+
+manager = ContextManager(project_root="./", project_name="my_project")
+context = manager.build_context(agent_id="hinton", task_state=current_task)
+prompt = context.to_prompt()  # Ready for LLM
 ```
 
 ## Best Practices
 
-1. **Use git** for version control—no need for v2 suffixes in filenames
-2. **Trust the agents** to use their tools; don't micromanage in prompts
-3. **Check ReadData/** before running analysis to confirm data exists
-4. **Review transcripts** for debugging and understanding agent decisions
-5. **Keep prompts focused** on what you want, not how to do it
+1. **Let agents work** - Trust the ReAct loop; don't micromanage
+2. **Check ReadData/** - Verify data exists before starting analysis
+3. **Use project names** - Helps with resuming and organization
+4. **Review transcripts** - Stored in Sandbox/project_name/ for debugging
+5. **Start simple** - Use `brainstorming` or `literature_review` to explore first
 
 ## Limitations
 
-- Agents may occasionally hallucinate if not grounded with tool use
-- Long-running scripts may timeout (5 minute limit)
-- Vision capabilities (PDF viewing) are experimental
+- Agents may hallucinate if not grounded with tool use
+- Long-running scripts may timeout (configurable limit)
 - API costs can accumulate with complex analyses
+- Requires API keys for full functionality
 
 ## IRB and Data Security
 
-⚠️ **MiniLab sends data to Anthropic's API**
+⚠️ **MiniLab sends data to external APIs (Anthropic, Tavily, NCBI)**
 
 Do NOT use with protected health information (PHI) without:
 - IRB approval
 - BAA with Anthropic
-- De-identification pipelines
+- Proper de-identification
 
 ## License
 
@@ -270,3 +293,17 @@ MIT License
 Inspired by:
 - [VirtualLab](https://www.nature.com/articles/s41586-025-09442-9) (Nature, 2025)
 - [CellVoyager](https://www.biorxiv.org/content/10.1101/2025.06.03.657517v1) (bioRxiv, 2025)
+
+## Changelog
+
+### v0.2.0 (December 2025)
+- Complete architecture refactor
+- Added PathGuard security system
+- Implemented SOTA 5-part prompting
+- Added RAG context with FAISS
+- Created modular workflow system
+- Integrated Tavily web search
+- Added PubMed/arXiv literature tools
+- New BohrOrchestrator for workflow coordination
+- Console utility for styled output
+- Comprehensive test suite

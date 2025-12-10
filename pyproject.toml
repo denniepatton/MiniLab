@@ -4,25 +4,47 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minilab"
-version = "0.1.0"
-description = "MiniLab: multi-agent scientific lab assistant"
-authors = [{ name = "Your Name" }]
+version = "0.2.0"
+description = "MiniLab: multi-agent scientific lab assistant with RAG and workflow orchestration"
+authors = [{ name = "Robert Patton" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  # Core
   "pyyaml>=6.0",
   "httpx>=0.27",
   "pydantic>=2.8",
   "python-dotenv>=1.0",
+  
+  # LLM
+  "anthropic>=0.34",
+  
+  # Embeddings & Vector Store
+  "sentence-transformers>=2.2",
+  "faiss-cpu>=1.7",
+  "numpy>=1.24",
+  
+  # Web/API
   "feedparser>=6.0",
+  "tavily-python>=0.3",
+  
+  # Data & Visualization
   "networkx>=3.0",
   "matplotlib>=3.7",
+  "pandas>=2.0",
+  
+  # Async
+  "aiofiles>=23.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest",
+  "pytest-asyncio",
   "ruff",
   "mypy",
 ]
+
+[project.scripts]
+minilab = "scripts.minilab:main"
 
