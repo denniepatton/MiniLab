@@ -2,20 +2,27 @@
 Embedding Manager for RAG system.
 
 Uses sentence-transformers for local embeddings.
+Supports async embedding with background processing.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 import numpy as np
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # Workaround for pyarrow compatibility issues with newer versions
 # https://github.com/huggingface/datasets/issues/6444
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+from ..utils.timing import timing
 
 
 class EmbeddingManager:
@@ -34,6 +41,7 @@ class EmbeddingManager:
         self,
         model_name: str = DEFAULT_MODEL,
         cache_dir: Optional[Path] = None,
+        async_enabled: bool = True,
     ):
         """
         Initialize embedding manager.
@@ -41,11 +49,16 @@ class EmbeddingManager:
         Args:
             model_name: sentence-transformers model to use
             cache_dir: Directory for caching embeddings
+            async_enabled: Enable async embedding operations
         """
         self.model_name = model_name
         self.cache_dir = cache_dir
         self._model = None
         self._cache: dict[str, np.ndarray] = {}
+        self._async_enabled = async_enabled
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._embedding_queue: asyncio.Queue = None
+        self._background_task: Optional[asyncio.Task] = None
         
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +91,6 @@ class EmbeddingManager:
                     "sentence-transformers not installed. "
                     "Run: pip install sentence-transformers"
                 )
-        return self._model
         return self._model
     
     @property
@@ -130,6 +142,8 @@ class EmbeddingManager:
         Returns:
             Embedding vector as numpy array
         """
+        start_time = time.perf_counter()
+        
         if use_cache:
             cache_key = self._text_hash(text)
             if cache_key in self._cache:
@@ -137,11 +151,44 @@ class EmbeddingManager:
         
         embedding = self.model.encode(text, convert_to_numpy=True)
         
+        # Record timing
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        timing().record("embed", "embedding", duration_ms)
+        
         if use_cache:
             self._cache[cache_key] = embedding
             # Periodically save cache
             if len(self._cache) % 100 == 0:
                 self._save_cache()
+        
+        return embedding
+    
+    async def embed_async(self, text: str, use_cache: bool = True) -> np.ndarray:
+        """
+        Async version of embed - runs in thread pool to avoid blocking.
+        
+        Args:
+            text: Text to embed
+            use_cache: Whether to use cached embeddings
+            
+        Returns:
+            Embedding vector as numpy array
+        """
+        if use_cache:
+            cache_key = self._text_hash(text)
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+        
+        # Initialize executor if needed
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=2)
+        
+        # Run embedding in thread pool
+        loop = asyncio.get_event_loop()
+        embedding = await loop.run_in_executor(
+            self._executor,
+            lambda: self.embed(text, use_cache=use_cache)
+        )
         
         return embedding
     

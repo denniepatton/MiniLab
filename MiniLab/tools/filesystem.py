@@ -91,6 +91,11 @@ class MoveInput(ToolInput):
     destination: str = Field(..., description="Destination path")
 
 
+class StatsInput(ToolInput):
+    """Input for getting file statistics."""
+    path: str = Field(..., description="Path to the file to get stats for")
+
+
 class FileOutput(ToolOutput):
     """Output for file operations."""
     path: Optional[str] = None
@@ -98,6 +103,11 @@ class FileOutput(ToolOutput):
     exists: Optional[bool] = None
     files: Optional[list[str]] = None
     matches: Optional[list[dict]] = None
+    # Stats fields
+    line_count: Optional[int] = None
+    size_bytes: Optional[int] = None
+    column_count: Optional[int] = None
+    columns: Optional[list[str]] = None
 
 
 class FileSystemTool(Tool):
@@ -125,6 +135,7 @@ class FileSystemTool(Tool):
             "head": "Read the first N lines of a file",
             "tail": "Read the last N lines of a file",
             "search": "Search for a pattern within a file",
+            "stats": "Get file statistics including line count, size, and for CSV files: column count and names",
             "create_dir": "Create a directory (Sandbox only)",
             "delete": "Delete a file or directory (Sandbox only)",
             "copy": "Copy a file (destination must be in Sandbox)",
@@ -141,6 +152,7 @@ class FileSystemTool(Tool):
             "head": HeadInput,
             "tail": TailInput,
             "search": SearchInput,
+            "stats": StatsInput,
             "create_dir": CreateDirInput,
             "delete": DeleteInput,
             "copy": CopyInput,
@@ -178,6 +190,8 @@ class FileSystemTool(Tool):
                 return await self._tail(validated)
             elif action == "search":
                 return await self._search(validated)
+            elif action == "stats":
+                return await self._stats(validated)
             elif action == "create_dir":
                 return await self._create_dir(validated)
             elif action == "delete":
@@ -321,6 +335,53 @@ class FileSystemTool(Tool):
                 })
         
         return FileOutput(success=True, path=str(path), matches=matches)
+    
+    async def _stats(self, params: StatsInput) -> FileOutput:
+        """Get file statistics including line count and CSV info."""
+        path = self._resolve_path(params.path)
+        self.path_guard.validate_read(path, self.agent_id)
+        
+        if not path.exists():
+            return FileOutput(success=False, error=f"File not found: {params.path}")
+        
+        # Get basic stats
+        size_bytes = path.stat().st_size
+        
+        # Count lines efficiently
+        line_count = 0
+        columns = None
+        column_count = None
+        
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            # Read first line for potential CSV header
+            first_line = f.readline()
+            if first_line:
+                line_count = 1
+                # Check if it looks like CSV
+                if path.suffix.lower() in [".csv", ".tsv", ".txt"]:
+                    delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
+                    columns = [c.strip().strip('"') for c in first_line.split(delimiter)]
+                    column_count = len(columns)
+            
+            # Count remaining lines
+            for _ in f:
+                line_count += 1
+        
+        # For CSV, subtract header from row count (data rows)
+        data_rows = line_count - 1 if columns and line_count > 0 else line_count
+        
+        console.tool_success("Stats", f"{params.path} ({line_count} lines, {data_rows} data rows)")
+        
+        return FileOutput(
+            success=True,
+            path=str(path),
+            line_count=line_count,
+            size_bytes=size_bytes,
+            column_count=column_count,
+            columns=columns,
+            data=f"File: {path.name}, Size: {size_bytes} bytes, Lines: {line_count}, Data rows: {data_rows}" + 
+                 (f", Columns: {column_count}" if column_count else ""),
+        )
     
     async def _create_dir(self, params: CreateDirInput) -> FileOutput:
         """Create directory."""

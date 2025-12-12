@@ -3,16 +3,18 @@
 MiniLab - Multi-Agent Scientific Lab Assistant
 
 Command-line interface for running MiniLab analysis sessions.
+All interactions flow through Bohr's consultation module.
 
 Usage:
-    python scripts/minilab.py "Analyze the genomic data"
-    python scripts/minilab.py --project my_project --workflow start_project
+    python scripts/minilab.py
     python scripts/minilab.py --resume Sandbox/my_project
-    python scripts/minilab.py --interactive
+    python scripts/minilab.py --list-projects
+    python scripts/minilab.py --timing  # Enable performance timing
 """
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 import json
@@ -31,62 +33,20 @@ def parse_args() -> argparse.Namespace:
         description="MiniLab: Multi-agent scientific lab assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Start a new analysis
-  python scripts/minilab.py "Analyze the Pluvicto genomic data"
-  
-  # Specify workflow explicitly
-  python scripts/minilab.py "What is the state of the art in proteomics?" --workflow literature_review
-  
-  # Resume an existing project
-  python scripts/minilab.py --resume Sandbox/pluvicto_analysis_20241215
-  
-  # Interactive mode
-  python scripts/minilab.py --interactive
-  
-Major Workflows:
-  brainstorming      - Explore ideas and approaches
-  literature_review  - Background research
-  start_project      - Full analysis pipeline (default)
-  work_on_existing   - Continue existing project
-  explore_dataset    - Data exploration focus
+MiniLab uses AI agents coordinated by Bohr to help with scientific analysis.
+All sessions begin with a consultation to understand your needs.
 
-Mini-Workflow Modules (used within major workflows):
-  CONSULTATION       - User discussion and requirement gathering
-  LITERATURE REVIEW  - Background research with PubMed/arXiv
-  PLANNING COMMITTEE - Multi-agent deliberation on approach
-  EXECUTE ANALYSIS   - Dayhoff->Hinton->Bayes implementation loop
-  WRITE-UP RESULTS   - Documentation and reporting
-  CRITICAL REVIEW    - Quality assessment and recommendations
+Examples:
+  python scripts/minilab.py                    # Start new session
+  python scripts/minilab.py --list-projects    # See existing projects
+  python scripts/minilab.py --resume Sandbox/my_project  # Continue project
+  python scripts/minilab.py --timing           # Enable performance metrics
         """,
-    )
-    
-    parser.add_argument(
-        "request",
-        nargs="?",
-        help="Analysis request or question",
-    )
-    
-    parser.add_argument(
-        "--project", "-p",
-        help="Project name (auto-generated if not specified)",
-    )
-    
-    parser.add_argument(
-        "--workflow", "-w",
-        choices=["brainstorming", "literature_review", "start_project", "work_on_existing", "explore_dataset"],
-        help="Workflow to run (auto-detected if not specified)",
     )
     
     parser.add_argument(
         "--resume", "-r",
         help="Path to existing project to resume",
-    )
-    
-    parser.add_argument(
-        "--interactive", "-i",
-        action="store_true",
-        help="Run in interactive mode with prompts",
     )
     
     parser.add_argument(
@@ -99,6 +59,12 @@ Mini-Workflow Modules (used within major workflows):
         "--verbose", "-v",
         action="store_true",
         help="Verbose output",
+    )
+    
+    parser.add_argument(
+        "--timing", "-t",
+        action="store_true",
+        help="Enable performance timing metrics",
     )
     
     return parser.parse_args()
@@ -154,89 +120,6 @@ def list_projects() -> None:
     print()
 
 
-async def interactive_mode() -> None:
-    """Run MiniLab in interactive mode."""
-    from MiniLab.utils import console
-    from MiniLab.orchestrators import BohrOrchestrator
-    from MiniLab.orchestrators.bohr_orchestrator import run_minilab
-    
-    console.header("MiniLab - Multi-Agent Scientific Lab Assistant")
-    print("\nWelcome! I'm Bohr, your orchestrator for scientific analysis.")
-    print("I coordinate a team of 9 specialist agents to help you with:")
-    print("  • Data analysis and modeling")
-    print("  • Literature review and synthesis")
-    print("  • Statistical validation")
-    print("  • Biological interpretation")
-    print("\nCommands: 'quit' | 'help' | 'list' | 'resume <path>'")
-    console.separator("─", 60)
-    
-    orchestrator = BohrOrchestrator()
-    
-    while True:
-        try:
-            user_input = console.user_prompt("YOU")
-            
-            if not user_input:
-                continue
-            
-            if user_input.lower() in ["quit", "exit", "q"]:
-                print("\nGoodbye! Your projects are saved in Sandbox/")
-                break
-            
-            if user_input.lower() == "help":
-                print("\nCommands:")
-                print("  quit/exit    - End session")
-                print("  help         - Show this help")
-                print("  list         - List existing projects")
-                print("  resume <path> - Resume a project")
-                print("\nWorkflows (specify with --workflow or auto-detected):")
-                print("  brainstorming     - Explore ideas")
-                print("  literature_review - Background research")
-                print("  start_project     - Full analysis")
-                print("  work_on_existing  - Continue project")
-                print("  explore_dataset   - Data exploration")
-                print("\nOr just type your analysis request!")
-                continue
-            
-            if user_input.lower() == "list":
-                list_projects()
-                continue
-            
-            if user_input.lower().startswith("resume "):
-                path = user_input.split(" ", 1)[1]
-                project_path = Path(path)
-                if not project_path.is_absolute():
-                    project_path = Path(__file__).parent.parent / path
-                
-                try:
-                    await orchestrator.resume_session(project_path)
-                    console.workflow_start("Resuming session")
-                    results = await orchestrator.run()
-                    console.agent_message("BOHR", results.get('final_summary', 'Session completed.'))
-                except Exception as e:
-                    console.error(f"Could not resume: {e}")
-                continue
-            
-            # Regular analysis request
-            console.agent_message("BOHR", "Starting analysis session...")
-            console.info("I'll first consult with you to understand your needs,")
-            print("        then coordinate the appropriate specialists.\n")
-            
-            results = await run_minilab(request=user_input)
-            
-            console.agent_message("BOHR", results.get('final_summary', 'Analysis complete.'))
-            
-            if orchestrator.session:
-                console.info(f"Project saved to: {orchestrator.session.project_path}")
-            
-        except KeyboardInterrupt:
-            print("\n\nInterrupted. Type 'quit' to exit or continue with a new request.")
-        except Exception as e:
-            console.error(str(e))
-            import traceback
-            traceback.print_exc()
-
-
 def show_welcome() -> str:
     """Display welcome message and prompt for input."""
     from MiniLab.utils import console
@@ -260,6 +143,8 @@ def show_welcome() -> str:
     print("  │" + " Or, simply describe what you need!".ljust(w) + "│")
     print("  └" + "─" * w + "┘")
     print()
+    print("  \033[2m💡 Tip: Press Ctrl+C anytime to pause and get options\033[0m")
+    print()
     
     # Prompt for input
     try:
@@ -274,15 +159,15 @@ async def main_async(args: argparse.Namespace) -> int:
     """Async main function."""
     from MiniLab.utils import console
     
+    # Enable timing if requested
+    if args.timing:
+        os.environ["MINILAB_TIMING"] = "1"
+    
     if args.verbose:
         console.set_verbose(True)
     
     if args.list_projects:
         list_projects()
-        return 0
-    
-    if args.interactive:
-        await interactive_mode()
         return 0
     
     from MiniLab.orchestrators import BohrOrchestrator
@@ -305,33 +190,21 @@ async def main_async(args: argparse.Namespace) -> int:
             console.error(f"Error resuming session: {e}")
             return 1
     
-    # If no request provided, show welcome and prompt for input
-    request = args.request
+    # Show welcome and get user request
+    request = show_welcome()
     if not request:
-        request = show_welcome()
-        if not request:
-            return 0  # User cancelled
-        
-        # Check for special commands
-        if request.lower() in ['--help', '-h', 'help']:
-            parse_args()  # This will show help and exit
-            return 0
-        if request.lower() in ['--list-projects', '-l', 'list']:
-            list_projects()
-            return 0
-        if request.lower() in ['--interactive', '-i', 'interactive']:
-            await interactive_mode()
-            return 0
+        return 0  # User cancelled
     
-    # Run analysis
+    # Check for special commands
+    if request.lower() in ['list', 'projects', 'list projects']:
+        list_projects()
+        return 0
+    
+    # Run analysis - always through consultation
     try:
         print()  # Clean spacing before Bohr takes over
         
-        results = await run_minilab(
-            request=request,
-            project_name=args.project,
-            workflow=args.workflow,
-        )
+        results = await run_minilab(request=request)
         
         print()
         console.workflow_complete("Analysis", results.get('final_summary', 'Done'))

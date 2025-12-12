@@ -2,7 +2,7 @@
 MiniLab Agents Module
 
 Refactored agent system with:
-- SOTA role-specific prompting
+- Structured role-specific prompting
 - ReAct loop with typed tools
 - Persistent state per task
 - Interrupt/pause capabilities

@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import time
 from pathlib import Path
 from typing import List, Optional, Union
 
 import httpx
 
 from .base import ChatMessage, LLMBackend
+from ..utils.timing import timing, async_timed_operation
 
 
 def pdf_to_images(pdf_path: str, max_pages: int = 10, dpi: int = 150) -> List[dict]:
@@ -98,6 +100,11 @@ def image_to_base64(image_path: str) -> Optional[dict]:
 class AnthropicBackend(LLMBackend):
     """
     Minimal Anthropic Messages API backend using HTTPX.
+    
+    Features:
+    - Prompt caching for system prompts (reduces costs by up to 90% on cache hits)
+    - Token usage tracking
+    - Automatic retries on transient errors
     """
 
     def __init__(self, model: str, api_key: str | None = None):
@@ -110,6 +117,30 @@ class AnthropicBackend(LLMBackend):
             base_url="https://api.anthropic.com/v1",
             timeout=180.0,  # Increased to 3 minutes for complex responses
         )
+        
+        # Token usage tracking
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._total_cache_creation_tokens = 0
+        self._total_cache_read_tokens = 0
+    
+    @property
+    def token_usage(self) -> dict:
+        """Return current token usage statistics."""
+        return {
+            "input_tokens": self._total_input_tokens,
+            "output_tokens": self._total_output_tokens,
+            "cache_creation_tokens": self._total_cache_creation_tokens,
+            "cache_read_tokens": self._total_cache_read_tokens,
+            "total_tokens": self._total_input_tokens + self._total_output_tokens,
+        }
+    
+    def _update_token_usage(self, usage: dict) -> None:
+        """Update token usage from API response."""
+        self._total_input_tokens += usage.get("input_tokens", 0)
+        self._total_output_tokens += usage.get("output_tokens", 0)
+        self._total_cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
+        self._total_cache_read_tokens += usage.get("cache_read_input_tokens", 0)
 
     async def acomplete(
         self,
@@ -117,7 +148,11 @@ class AnthropicBackend(LLMBackend):
         temperature: float = 0.2,
         max_tokens: int | None = None,
         max_retries: int = 3,
+        use_cache: bool = True,
     ) -> str:
+        # Track timing
+        start_time = time.perf_counter()
+        
         # Anthropic requires extracting system messages separately
         system_content = None
         anthropic_messages = []
@@ -142,8 +177,26 @@ class AnthropicBackend(LLMBackend):
             "max_tokens": max_tokens or 4096,
         }
         
+        # Build headers - enable caching beta if requested
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        
         if system_content:
-            payload["system"] = system_content
+            if use_cache:
+                # Enable prompt caching beta
+                headers["anthropic-beta"] = "prompt-caching-2024-07-31"
+                # Format system as array with cache_control on last block
+                payload["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            else:
+                payload["system"] = system_content
 
         # Retry logic for transient errors
         last_error = None
@@ -152,10 +205,7 @@ class AnthropicBackend(LLMBackend):
                 resp = await self._client.post(
                     "/messages",
                     json=payload,
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                    },
+                    headers=headers,
                 )
                 
                 # Handle HTTP errors
@@ -177,7 +227,28 @@ class AnthropicBackend(LLMBackend):
                     resp.raise_for_status()
                 
                 data = resp.json()
-                return data["content"][0]["text"]
+                result = data["content"][0]["text"]
+                
+                # Track token usage from response
+                if "usage" in data:
+                    self._update_token_usage(data["usage"])
+                    # Log cache effectiveness if timing enabled
+                    usage = data["usage"]
+                    cache_read = usage.get("cache_read_input_tokens", 0)
+                    cache_create = usage.get("cache_creation_input_tokens", 0)
+                    if cache_read > 0 or cache_create > 0:
+                        import os
+                        if os.environ.get("MINILAB_TIMING") == "1":
+                            if cache_read > 0:
+                                print(f"  💾 Cache hit: {cache_read:,} tokens read from cache")
+                            if cache_create > 0:
+                                print(f"  💾 Cache miss: {cache_create:,} tokens cached for future use")
+                
+                # Record timing
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                timing().record("acomplete", "llm", duration_ms, model=self.model)
+                
+                return result
                 
             except httpx.ReadTimeout as e:
                 last_error = e
@@ -206,6 +277,7 @@ class AnthropicBackend(LLMBackend):
         temperature: float = 0.2,
         max_tokens: int | None = None,
         max_retries: int = 3,
+        use_cache: bool = True,
     ) -> str:
         """
         Complete with vision - send images along with text for visual analysis.
@@ -216,6 +288,7 @@ class AnthropicBackend(LLMBackend):
             temperature: Sampling temperature
             max_tokens: Max response tokens
             max_retries: Retry count
+            use_cache: Enable prompt caching for system prompts
         """
         # Anthropic requires extracting system messages separately
         system_content = None
@@ -255,8 +328,24 @@ class AnthropicBackend(LLMBackend):
             "max_tokens": max_tokens or 4096,
         }
         
+        # Build headers - enable caching beta if requested
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        
         if system_content:
-            payload["system"] = system_content
+            if use_cache:
+                headers["anthropic-beta"] = "prompt-caching-2024-07-31"
+                payload["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            else:
+                payload["system"] = system_content
 
         last_error = None
         for attempt in range(max_retries):
@@ -264,10 +353,7 @@ class AnthropicBackend(LLMBackend):
                 resp = await self._client.post(
                     "/messages",
                     json=payload,
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                    },
+                    headers=headers,
                 )
                 
                 if resp.status_code != 200:
@@ -287,6 +373,11 @@ class AnthropicBackend(LLMBackend):
                     resp.raise_for_status()
                 
                 data = resp.json()
+                
+                # Track token usage
+                if "usage" in data:
+                    self._update_token_usage(data["usage"])
+                
                 return data["content"][0]["text"]
                 
             except (httpx.ReadTimeout, httpx.ConnectError) as e:

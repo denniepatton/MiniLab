@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from pathlib import Path
 import json
+import re
 
 from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
 from ..utils import console
@@ -358,7 +359,7 @@ Be honest about limitations and assumptions.""",
     
     async def _select_next_speaker(self) -> str:
         """
-        Select next speaker using context-based LLM decision.
+        Select next speaker using JSON-structured LLM decision.
         
         Returns agent name or "CONSENSUS" if deliberation should end.
         """
@@ -368,7 +369,7 @@ Be honest about limitations and assumptions.""",
         dialogue_history = self._format_dialogue_history()
         recent_speakers = [t["speaker"] for t in self._state["dialogue"][-3:]]
         
-        # Use Bohr (as facilitator) to decide next speaker
+        # Use Bohr (as facilitator) to decide next speaker with JSON response
         selection_result = await self._run_agent_task(
             agent_name="bohr",
             task=f"""As meeting facilitator, decide who should speak next.
@@ -378,26 +379,49 @@ Recent Discussion:
 
 Recent Speakers: {', '.join(recent_speakers)}
 
-Available Experts:
+Available Experts and Their Domains:
 {json.dumps(self.AGENT_EXPERTISE, indent=2)}
 
-Rules:
-1. Avoid same speaker twice in a row
-2. Choose based on what expertise is needed next
-3. If discussion is converging and key points covered, return "CONSENSUS"
+RESPOND WITH A JSON OBJECT ONLY:
+{{"next_speaker": "agent_name", "reasoning": "why this expert should speak", "consensus_reached": false}}
 
-Respond with ONLY the agent name (e.g., "hinton") or "CONSENSUS".""",
+Or if the discussion has covered all key points:
+{{"next_speaker": null, "reasoning": "why we have consensus", "consensus_reached": true}}
+
+Rules:
+- Avoid same speaker twice in a row
+- Choose based on what expertise is needed next
+- Set consensus_reached=true only when all major topics are addressed""",
         )
         
-        response = selection_result.get("response", "").strip().lower()
+        response = selection_result.get("response", "").strip()
         
-        # Parse the response
-        if "consensus" in response:
+        # Parse JSON response
+        try:
+            # Handle markdown code blocks
+            if "```" in response:
+                json_match = re.search(r'```(?:json)?\s*(\{[^`]+\})\s*```', response, re.DOTALL)
+                if json_match:
+                    response = json_match.group(1)
+            
+            data = json.loads(response)
+            
+            if data.get("consensus_reached", False):
+                return "CONSENSUS"
+            
+            next_speaker = data.get("next_speaker", "").lower()
+            if next_speaker in self.AGENT_EXPERTISE:
+                return next_speaker
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        
+        # Fallback: look for agent names in response
+        response_lower = response.lower()
+        if "consensus" in response_lower:
             return "CONSENSUS"
         
-        # Extract agent name
         for agent in self.AGENT_EXPERTISE:
-            if agent in response:
+            if agent in response_lower:
                 return agent
         
         # Default to round-robin if parsing fails

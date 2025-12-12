@@ -29,7 +29,7 @@ GUILDS = {
 }
 
 # Default LLM model
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-5"
 
 
 class AgentRegistry:
@@ -37,7 +37,7 @@ class AgentRegistry:
     Registry for creating and managing agents.
     
     Creates agents with:
-    - SOTA prompts
+    - Structured prompts
     - Typed tools with permissions
     - LLM backends
     - Colleague relationships
@@ -120,7 +120,7 @@ class AgentRegistry:
         
         model = model or self.default_model
         
-        # Get SOTA prompt
+        # Get structured prompt
         prompts = PromptBuilder.build_all_prompts()
         if agent_id not in prompts:
             raise ValueError(f"Unknown agent: {agent_id}")
@@ -156,6 +156,15 @@ class AgentRegistry:
             tools=tools,
             context_manager=self.context_manager,
             max_iterations=prompt.max_iterations,
+        )
+        
+        # Register agent header with context manager for RAG retrieval
+        self.context_manager.set_agent_header(
+            agent_id=agent_id,
+            persona=prompt.persona,
+            role=guild or "unknown",
+            objective=prompt.mission,
+            tools_documentation=tools_doc,
         )
         
         self._agents[agent_id] = agent
@@ -215,6 +224,7 @@ def create_agents(
     input_callback: Optional[Callable[[str, Optional[list[str]]], str]] = None,
     permission_callback: Optional[Callable[[str], bool]] = None,
     model: str = DEFAULT_MODEL,
+    enable_async_context: bool = True,
 ) -> tuple[dict[str, Agent], ContextManager, ToolFactory]:
     """
     Convenience function to create all agents with full setup.
@@ -224,12 +234,17 @@ def create_agents(
         input_callback: Callback for user input
         permission_callback: Callback for permission requests
         model: LLM model to use
+        enable_async_context: Enable background context updates
         
     Returns:
         Tuple of (agents dict, context_manager, tool_factory)
     """
     # Create context manager
     context_manager = ContextManager(workspace_root)
+    
+    # Start background updater for async context operations
+    if enable_async_context:
+        context_manager.start_background_updater()
     
     # Create tool factory
     tool_factory = ToolFactory(

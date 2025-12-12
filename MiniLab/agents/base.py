@@ -175,7 +175,7 @@ class Agent:
             agent_id: Unique agent identifier
             name: Display name
             guild: Guild membership
-            system_prompt: SOTA-formatted system prompt
+            system_prompt: Structured system prompt
             llm_backend: LLM backend for completions
             tools: Dict of tool name to Tool instance
             context_manager: Context manager for RAG
@@ -206,6 +206,14 @@ class Agent:
         """Set colleague references."""
         self.colleagues = colleagues
     
+    def _report_activity(self, activity: str) -> None:
+        """Report current activity to the global spinner."""
+        try:
+            from ..utils import Spinner
+            Spinner.set_global_activity(activity)
+        except Exception:
+            pass  # Spinner may not be active
+    
     def request_interrupt(self) -> None:
         """Request agent to interrupt at next safe point."""
         self._interrupt_requested = True
@@ -233,6 +241,9 @@ class Agent:
         Returns:
             AgentResponse with results
         """
+        # Report activity to spinner
+        self._report_activity(f"[{self.agent_id.upper()}] is starting task")
+        
         # Initialize or resume state
         if resume_state:
             self._current_state = resume_state
@@ -439,10 +450,17 @@ class Agent:
         state: AgentState,
     ) -> str:
         """Execute a tool and return result string."""
+        # Check for interrupt before executing tool
+        if self._interrupt_requested:
+            return "[INTERRUPTED] Tool execution cancelled - exit requested"
+        
         if tool_name not in self.tools:
             return f"Error: Unknown tool '{tool_name}'"
         
         tool = self.tools[tool_name]
+        
+        # Report activity
+        self._report_activity(f"[{self.agent_id.upper()}] using {tool_name}.{action}")
         
         # Notify callback
         if self.on_tool_call:
@@ -486,11 +504,18 @@ class Agent:
         state: AgentState,
         project_name: str,
     ) -> str:
-        """Consult a colleague agent."""
+        """Consult a colleague agent with visible output to user."""
         if colleague_id not in self.colleagues:
             return f"Error: Unknown colleague '{colleague_id}'"
         
         colleague = self.colleagues[colleague_id]
+        
+        # Report activity and make it visible to user
+        self._report_activity(f"[{self.agent_id.upper()}] consulting [{colleague_id.upper()}]")
+        
+        # Visible output to user
+        from ..utils import console
+        console.agent_handoff(self.agent_id, colleague_id, f"Consulting on: {question[:60]}..." if len(question) > 60 else f"Consulting on: {question}")
         
         # Record colleague call
         state.colleague_calls.append({
@@ -508,7 +533,10 @@ class Agent:
             )
             
             if response.status == AgentStatus.COMPLETED:
-                return response.result or "Colleague completed without explicit result"
+                result = response.result or "Colleague completed without explicit result"
+                # Show brief summary of consultation result
+                console.agent_response(colleague_id, result[:80] + "..." if len(result) > 80 else result)
+                return result
             else:
                 return f"Colleague response (status={response.status.value}): {response.error or response.result}"
                 
@@ -576,7 +604,7 @@ class Agent:
         """
         Simple one-shot query without ReAct loop.
         
-        Useful for quick consultations.
+        Useful for quick consultations. Strips any tool call blocks from output.
         """
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -587,4 +615,18 @@ class Agent:
         else:
             messages.append({"role": "user", "content": query})
         
-        return await self.llm.acomplete(messages)
+        response = await self.llm.acomplete(messages)
+        
+        # Strip any tool call blocks from the response
+        return self._clean_tool_blocks(response)
+    
+    def _clean_tool_blocks(self, text: str) -> str:
+        """Remove tool call blocks from text for clean display."""
+        import re
+        # Remove ```tool ... ``` blocks
+        cleaned = re.sub(r'```tool\s*\{[^}]+\}\s*```', '', text, flags=re.DOTALL)
+        # Remove ```colleague ... ``` blocks  
+        cleaned = re.sub(r'```colleague\s*\{[^}]+\}\s*```', '', cleaned, flags=re.DOTALL)
+        # Clean up extra whitespace
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        return cleaned.strip()

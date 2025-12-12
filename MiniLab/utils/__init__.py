@@ -373,33 +373,91 @@ class Spinner:
         spinner.start()
         do_work()
         spinner.stop("Done!")
+    
+    Activity Tracking:
+        spinner.set_activity("[BOHR] is consulting with [FEYNMAN]")
+        spinner.set_activity("[DAYHOFF] is exploring the dataset")
     """
     
     FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    
+    # Singleton for global access during workflows
+    _current_spinner = None
     
     def __init__(self, message: str = "Working", color: str = Style.CYAN):
         self.message = message
         self.color = color
         self._running = False
+        self._paused = False
         self._thread = None
         self._frame_idx = 0
         self._lock = None
+        self._activity = ""  # Current detailed activity
+        self._last_output_line = ""
+    
+    @classmethod
+    def current(cls) -> Optional["Spinner"]:
+        """Get the currently active spinner, if any."""
+        return cls._current_spinner
+    
+    @classmethod
+    def set_global_activity(cls, activity: str) -> None:
+        """Set activity on the current spinner (if active)."""
+        if cls._current_spinner and cls._current_spinner._running:
+            cls._current_spinner.set_activity(activity)
+    
+    @classmethod
+    def pause_for_input(cls) -> bool:
+        """Pause the current spinner for user input. Returns True if was running."""
+        if cls._current_spinner and cls._current_spinner._running:
+            cls._current_spinner.pause()
+            return True
+        return False
+    
+    @classmethod
+    def resume_after_input(cls) -> None:
+        """Resume the current spinner after user input."""
+        if cls._current_spinner and cls._current_spinner._paused:
+            cls._current_spinner.resume()
     
     def _animate(self):
         """Animation loop running in background thread."""
         import time
         try:
             while self._running:
+                if self._paused:
+                    time.sleep(0.1)
+                    continue
+                    
                 frame = self.FRAMES[self._frame_idx % len(self.FRAMES)]
                 styled_frame = f"{self.color}{frame}{Style.RESET}"
+                
+                # Build display: base message + activity
+                if self._activity:
+                    display = f"{self.message}: {self._activity}"
+                else:
+                    display = self.message
+                
+                # Truncate if too long
+                max_width = 70
+                if len(display) > max_width:
+                    display = display[:max_width-3] + "..."
+                
                 # Write spinner, message, then return cursor to start of line
                 with self._lock:
-                    sys.stdout.write(f"\r  {styled_frame} {self.message}".ljust(60))
+                    output = f"\r  {styled_frame} {display}"
+                    sys.stdout.write(output.ljust(80))
                     sys.stdout.flush()
+                    self._last_output_line = output
+                
                 self._frame_idx += 1
                 time.sleep(0.1)
         except Exception:
             pass  # Silently exit if stdout is closed
+    
+    def set_activity(self, activity: str) -> None:
+        """Update the detailed activity message."""
+        self._activity = activity
     
     def start(self):
         """Start the spinner."""
@@ -408,12 +466,30 @@ class Spinner:
             return
         self._lock = threading.Lock()
         self._running = True
-        self._thread = threading.Thread(target=self._animate, daemon=True)
+        self._paused = False
+        self._thread = threading.Thread(target=self._animate, daemon=False)
         self._thread.start()
+        Spinner._current_spinner = self
+    
+    def pause(self):
+        """Pause spinner animation (for user input)."""
+        self._paused = True
+        # Clear the line
+        try:
+            with self._lock:
+                sys.stdout.write("\r" + " " * 80 + "\r")
+                sys.stdout.flush()
+        except Exception:
+            pass
+    
+    def resume(self):
+        """Resume spinner animation after pause."""
+        self._paused = False
     
     def update(self, message: str):
-        """Update the spinner message."""
+        """Update the spinner base message."""
         self.message = message
+        self._activity = ""  # Clear activity on new phase
     
     def stop(self, final_message: str = None):
         """Stop the spinner with optional final message."""
@@ -423,12 +499,14 @@ class Spinner:
             self._thread = None
         # Clear the spinner line
         try:
-            sys.stdout.write("\r" + " " * 60 + "\r")
+            sys.stdout.write("\r" + " " * 80 + "\r")
             sys.stdout.flush()
             if final_message:
                 print(f"  {Style.GREEN}{StatusIcon.SUCCESS}{Style.RESET} {final_message}")
         except Exception:
             pass
+        if Spinner._current_spinner is self:
+            Spinner._current_spinner = None
     
     def stop_error(self, error_message: str):
         """Stop the spinner with an error message."""
@@ -438,11 +516,13 @@ class Spinner:
             self._thread = None
         # Clear the spinner line
         try:
-            sys.stdout.write("\r" + " " * 60 + "\r")
+            sys.stdout.write("\r" + " " * 80 + "\r")
             sys.stdout.flush()
             print(f"  {Style.RED}{StatusIcon.FAILURE}{Style.RESET} {error_message}")
         except Exception:
             pass
+        if Spinner._current_spinner is self:
+            Spinner._current_spinner = None
     
     def __enter__(self):
         self.start()
@@ -458,3 +538,61 @@ class Spinner:
 
 # Convenience singleton
 console = Console()
+
+
+def get_current_timestamp() -> str:
+    """
+    Get current timestamp in ISO format.
+    
+    This is the ONLY way agents should get timestamps - never hallucinate dates.
+    Returns format: YYYY-MM-DD HH:MM:SS
+    """
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_current_date() -> str:
+    """
+    Get current date for documentation.
+    
+    This is the ONLY way agents should get dates - never hallucinate dates.
+    Returns format: YYYY-MM-DD
+    """
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+# Import timing utilities
+from .timing import (
+    TimingCollector,
+    TimingContext,
+    TimingRecord,
+    timing,
+    timed,
+    timed_operation,
+    async_timed_operation,
+    enable_timing,
+    disable_timing,
+    print_timing_summary,
+)
+
+__all__ = [
+    # Console
+    "Style",
+    "StatusIcon",
+    "Console",
+    "console",
+    "Spinner",
+    # Utilities
+    "get_current_timestamp",
+    "get_current_date",
+    # Timing
+    "TimingCollector",
+    "TimingContext",
+    "TimingRecord",
+    "timing",
+    "timed",
+    "timed_operation",
+    "async_timed_operation",
+    "enable_timing",
+    "disable_timing",
+    "print_timing_summary",
+]

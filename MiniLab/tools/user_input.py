@@ -32,6 +32,24 @@ class UserInputOutput(ToolOutput):
     confirmed: Optional[bool] = None
 
 
+def _pause_spinner() -> bool:
+    """Pause the global spinner if running. Returns True if was running."""
+    try:
+        from ..utils import Spinner
+        return Spinner.pause_for_input()
+    except Exception:
+        return False
+
+
+def _resume_spinner() -> None:
+    """Resume the global spinner if it was paused."""
+    try:
+        from ..utils import Spinner
+        Spinner.resume_after_input()
+    except Exception:
+        pass
+
+
 class UserInputTool(Tool):
     """
     User interaction tool for agent-user communication.
@@ -102,7 +120,7 @@ class UserInputTool(Tool):
             )
         
         # Build prompt
-        prompt_parts = [f"[{self.agent_id.upper()}]: {params.question}"]
+        prompt_parts = [f"{params.question}"]
         
         if params.context:
             prompt_parts.append(f"\nContext: {params.context}")
@@ -114,6 +132,9 @@ class UserInputTool(Tool):
             prompt_parts.append(f"\n(Default: {params.default})")
         
         prompt = "".join(prompt_parts)
+        
+        # Pause spinner for user input
+        was_spinning = _pause_spinner()
         
         try:
             response = self.input_callback(prompt, params.choices)
@@ -141,6 +162,10 @@ class UserInputTool(Tool):
                 success=False,
                 error="User interrupted input"
             )
+        finally:
+            # Resume spinner
+            if was_spinning:
+                _resume_spinner()
     
     async def _confirm(self, params: ConfirmInput) -> UserInputOutput:
         """Ask the user for confirmation."""
@@ -151,7 +176,10 @@ class UserInputTool(Tool):
             )
         
         default_str = "Y/n" if params.default else "y/N"
-        prompt = f"[{self.agent_id.upper()}]: {params.message} [{default_str}]"
+        prompt = f"{params.message} [{default_str}]"
+        
+        # Pause spinner for user input
+        was_spinning = _pause_spinner()
         
         try:
             response = self.input_callback(prompt, None)
@@ -169,3 +197,7 @@ class UserInputTool(Tool):
                 confirmed=False,
                 error="User interrupted input"
             )
+        finally:
+            # Resume spinner
+            if was_spinning:
+                _resume_spinner()

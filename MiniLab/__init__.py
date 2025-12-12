@@ -8,7 +8,7 @@ Architecture:
 - security/: PathGuard for file access control
 - tools/: Typed tool system with Pydantic validation
 - context/: RAG-based context management with FAISS
-- agents/: SOTA-prompted agents with ReAct loops
+- agents/: Structured role-specific agents with ReAct loops
 - workflows/: Modular workflow components
 - orchestrators/: Bohr orchestrator for workflow coordination
 
@@ -21,7 +21,7 @@ Quick Start:
     )
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Core exports
 from .orchestrators import BohrOrchestrator, MiniLabSession
@@ -55,7 +55,7 @@ from .workflows import (
     CriticalReviewModule,
 )
 
-# Legacy support - create_agents is the new API
+# Agent creation utility
 from .agents.registry import create_agents
 
 __all__ = [
@@ -90,6 +90,6 @@ __all__ = [
     "ExecuteAnalysisModule",
     "WriteupResultsModule",
     "CriticalReviewModule",
-    # Legacy/convenience
+    # Utilities
     "create_agents",
 ]

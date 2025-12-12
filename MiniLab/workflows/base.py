@@ -254,6 +254,10 @@ class WorkflowModule(ABC):
         if rag_context:
             full_context["relevant_context"] = rag_context
         
+        # Always include project path so agents know where to write files
+        full_context["project_path"] = str(self.project_path)
+        full_context["project_name"] = self.project_path.name
+        
         # Execute agent task
         result = await agent.execute_task(
             task=task,
@@ -263,11 +267,17 @@ class WorkflowModule(ABC):
         
         # Index result for future RAG retrieval
         if self.context_manager and result.get("response"):
+            import hashlib
+            doc_id = hashlib.md5(f"{self.name}/{agent_name}/{task[:50]}".encode()).hexdigest()[:12]
             self.context_manager.index_document(
                 project_name=self.project_path.name,
+                doc_id=doc_id,
                 content=result["response"],
-                source=f"{self.name}/{agent_name}",
-                metadata={"agent": agent_name, "task": task[:100]},
+                metadata={
+                    "agent": agent_name,
+                    "task": task[:100],
+                    "source": f"{self.name}/{agent_name}",
+                },
             )
         
         return result

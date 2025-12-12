@@ -184,7 +184,7 @@ class BohrOrchestrator:
             user_callback: Function to get user input (for non-interactive)
             transcripts_dir: Directory for saving transcripts
         """
-        self.llm_backend = llm_backend or AnthropicBackend(model="claude-sonnet-4-20250514")
+        self.llm_backend = llm_backend or AnthropicBackend(model="claude-sonnet-4-5")
         self.user_callback = user_callback or self._default_user_input
         
         # Set up transcript logger
@@ -197,20 +197,30 @@ class BohrOrchestrator:
         self.session: Optional[MiniLabSession] = None
         
         self._interrupt_requested = False
+        self._exit_requested = False
+        self._token_budget: Optional[int] = None
+        self._tokens_used: int = 0
     
     def _default_user_input(self, prompt: str) -> str:
         """Default user input via stdin."""
-        print(f"\n[BOHR]: {prompt}")
-        return input("[YOU]: ").strip()
+        from ..utils import console, Style
+        print()  # Clean line
+        console.agent_message("BOHR", prompt)
+        print()
+        return input(f"  {Style.BOLD}{Style.GREEN}▶ Your response:{Style.RESET} ").strip()
     
     def _user_input_callback(self, prompt: str, options: Optional[list[str]] = None) -> str:
         """Callback for tools that need user input."""
+        from ..utils import Style
+        print()  # Clean line
         if options:
             print(f"\n[BOHR]: {prompt}")
             for i, opt in enumerate(options, 1):
                 print(f"  {i}. {opt}")
-            return input("[YOU]: ").strip()
-        return self.user_callback(prompt)
+            return input(f"  {Style.BOLD}{Style.GREEN}▶ Your choice:{Style.RESET} ").strip()
+        print(f"\n[BOHR]: {prompt}")
+        print()
+        return input(f"  {Style.BOLD}{Style.GREEN}▶ Your response:{Style.RESET} ").strip()
     
     async def start_session(
         self,
@@ -329,21 +339,64 @@ class BohrOrchestrator:
             
             # Get workflow sequence
             workflow_sequence = self.WORKFLOW_SEQUENCES[major_workflow]
-            console.agent_message("BOHR", f"Starting {major_workflow.value} workflow ({len(workflow_sequence)} phases)")
+            
+            # Narrative-style introduction instead of system message
+            workflow_intros = {
+                MajorWorkflow.START_PROJECT: "Sounds like we're starting a new project! I'll guide us through the full research pipeline - from understanding your goals through analysis and writeup.",
+                MajorWorkflow.LITERATURE_REVIEW: "I'll help you explore the literature on this topic. Let's see what's out there and build a solid foundation.",
+                MajorWorkflow.BRAINSTORMING: "Let's brainstorm together! I'll help you think through the possibilities and form a concrete plan.",
+                MajorWorkflow.EXPLORE_DATASET: "Let's dive into your data and see what stories it has to tell. I love a good exploration!",
+                MajorWorkflow.WORK_ON_EXISTING: "Picking up where we left off - let me review what we've done and figure out the best next steps.",
+            }
+            intro = workflow_intros.get(major_workflow, f"Let's work through this together.")
+            console.agent_message("BOHR", intro)
             
             # Execute workflow sequence
             results = {}
             for i, workflow_name in enumerate(workflow_sequence, 1):
-                if self._interrupt_requested:
-                    console.warning("Interrupt requested, pausing execution")
-                    self._log("Interrupt requested, pausing execution", console_print=False)
+                if self._interrupt_requested or self._exit_requested:
+                    if self._exit_requested:
+                        console.info("Exiting as requested")
+                        self._log("User requested exit", console_print=False)
+                    else:
+                        console.warning("Interrupt requested, pausing execution")
+                        self._log("Interrupt requested, pausing execution", console_print=False)
                     break
+                
+                # Check token budget before starting new workflow
+                if self._token_budget:
+                    current_usage = self.llm_backend.token_usage.get("total_tokens", 0)
+                    budget_used_pct = (current_usage / self._token_budget) * 100
+                    remaining_workflows = len(workflow_sequence) - i + 1
+                    remaining_budget = self._token_budget - current_usage
+                    budget_per_workflow = remaining_budget / max(1, remaining_workflows)
+                    
+                    if current_usage >= self._token_budget:
+                        console.warning(f"We've used our token budget ({current_usage:,}/{self._token_budget:,}).")
+                        console.agent_message("BOHR", "I'll wrap up with what we have. Here's a summary of our work so far...")
+                        break
+                    elif budget_used_pct >= 85:
+                        # Dynamically decide: skip to writeup if we're running low
+                        console.warning(f"Budget at {budget_used_pct:.0f}% - I'll prioritize the most important remaining work.")
+                        remaining = workflow_sequence[i-1:]
+                        if "writeup_results" in remaining and workflow_name not in ["writeup_results", "critical_review"]:
+                            console.agent_message("BOHR", "Given our budget, let me skip ahead to summarizing our findings.")
+                            workflow_name = "writeup_results"
+                    elif budget_used_pct >= 60:
+                        # Inform but continue - allocate remaining budget dynamically
+                        console.info(f"Budget update: {budget_used_pct:.0f}% used ({current_usage:,}/{self._token_budget:,}). ~{budget_per_workflow:,.0f} tokens per remaining phase.")
                 
                 # Show progress with spinner
                 phase_msg = f"Phase {i}/{len(workflow_sequence)}: {workflow_name.replace('_', ' ').title()}"
                 console.info(phase_msg)
-                spinner = Spinner(f"Running {workflow_name}...")
+                spinner = Spinner(f"Running {workflow_name.replace('_', ' ').title()}")
                 spinner.start()
+                
+                # Log stage transition to transcript
+                self.transcript.log_stage_transition(
+                    workflow_name,
+                    f"Starting {workflow_name.replace('_', ' ').title()} (Phase {i}/{len(workflow_sequence)})"
+                )
                 
                 self._log(f"Starting workflow: {workflow_name}", console_print=False)
                 self.session.current_workflow = workflow_name
@@ -357,9 +410,21 @@ class BohrOrchestrator:
                     self.session.completed_workflows.append(workflow_name)
                     spinner.stop(f"{workflow_name} completed")
                     self._log(f"Completed: {workflow_name}", console_print=False)
+                    # Log completion to transcript
+                    self.transcript.log_system_event(
+                        "workflow_complete",
+                        f"{workflow_name} completed successfully",
+                        {"summary": result.summary} if result.summary else None
+                    )
                 elif result.status == WorkflowStatus.FAILED:
                     spinner.stop_error(f"{workflow_name} failed: {result.error}")
                     self._log(f"Failed: {workflow_name} - {result.error}", console_print=False)
+                    # Log failure to transcript
+                    self.transcript.log_system_event(
+                        "workflow_failed",
+                        f"{workflow_name} failed",
+                        {"error": result.error}
+                    )
                     # Ask user how to proceed
                     proceed = await self._handle_workflow_failure(workflow_name, result)
                     if not proceed:
@@ -370,6 +435,11 @@ class BohrOrchestrator:
                 # Pass outputs to next workflow's context
                 if result.outputs:
                     self.session.context.update(result.outputs)
+                    # Extract token budget from consultation if present
+                    if workflow_name == "consultation" and result.outputs.get("token_budget"):
+                        self._token_budget = result.outputs["token_budget"]
+                        # Post-consultation summary
+                        self._show_post_consultation_summary(result)
                 
                 self.session.save()
             
@@ -381,76 +451,80 @@ class BohrOrchestrator:
             self.session.current_workflow = None
             self.session.save()
             
+            # Save transcript
+            try:
+                transcript_path = self.transcript.save_transcript()
+                self._log(f"Transcript saved to: {transcript_path}", console_print=False)
+            except Exception as e:
+                self._log(f"Failed to save transcript: {e}", console_print=False)
+            
             return results
             
         except Exception as e:
             self._log(f"Orchestration error: {str(e)}")
             if self.session:
                 self.session.save()
+            # Try to save transcript even on error
+            try:
+                self.transcript.save_transcript()
+            except Exception:
+                pass
             raise
     
     async def _determine_workflow(self) -> MajorWorkflow:
         """
-        Use Bohr to determine the appropriate workflow.
+        Use Bohr to determine the appropriate workflow via JSON response.
         
         Returns:
             Selected MajorWorkflow
         """
+        import json as json_module
+        
         user_request = self.session.context.get("user_request", "")
         
-        # Ask Bohr to classify the request
-        bohr = self.agents.get("bohr")
-        if not bohr:
-            # Fallback classification without agent
-            return self._simple_workflow_classification(user_request)
-        
-        classification_result = await bohr.execute_task(
-            task=f"""Classify this user request into one of these workflow types:
+        # Use LLM to classify with structured JSON response
+        try:
+            messages = [
+                {"role": "system", "content": """You are Bohr, classifying a research request into the appropriate workflow.
 
-User Request: {user_request}
+RESPOND WITH ONLY A JSON OBJECT:
+{"workflow": "WORKFLOW_NAME", "confidence": 0.0-1.0, "reasoning": "brief explanation"}
 
-Workflow Options:
-1. BRAINSTORMING - User wants to explore ideas, discuss approaches, no concrete analysis yet
-2. LITERATURE_REVIEW - User wants background research on a topic
-3. START_PROJECT - User wants to conduct a complete new analysis
-4. WORK_ON_EXISTING - User wants to continue or modify an existing project
-5. EXPLORE_DATASET - User wants to understand a dataset through EDA
-
-Respond with ONLY the workflow name (e.g., "START_PROJECT").
-If unclear, ask a clarifying question using the user_input tool.""",
-        )
-        
-        response = classification_result.get("response", "").upper().strip()
-        
-        # Map response to enum
-        workflow_map = {
-            "BRAINSTORMING": MajorWorkflow.BRAINSTORMING,
-            "LITERATURE_REVIEW": MajorWorkflow.LITERATURE_REVIEW,
-            "START_PROJECT": MajorWorkflow.START_PROJECT,
-            "WORK_ON_EXISTING": MajorWorkflow.WORK_ON_EXISTING,
-            "EXPLORE_DATASET": MajorWorkflow.EXPLORE_DATASET,
-        }
-        
-        for key, value in workflow_map.items():
-            if key in response:
-                return value
-        
-        # Default to start_project
-        return MajorWorkflow.START_PROJECT
-    
-    def _simple_workflow_classification(self, request: str) -> MajorWorkflow:
-        """Simple keyword-based workflow classification."""
-        request_lower = request.lower()
-        
-        if any(w in request_lower for w in ["brainstorm", "idea", "discuss", "think about"]):
-            return MajorWorkflow.BRAINSTORMING
-        elif any(w in request_lower for w in ["literature", "papers", "research", "review", "background"]):
-            return MajorWorkflow.LITERATURE_REVIEW
-        elif any(w in request_lower for w in ["continue", "existing", "resume", "previous"]):
-            return MajorWorkflow.WORK_ON_EXISTING
-        elif any(w in request_lower for w in ["explore", "eda", "understand data", "look at"]):
-            return MajorWorkflow.EXPLORE_DATASET
-        else:
+Valid WORKFLOW_NAME values:
+- BRAINSTORMING: For exploring ideas, hypothesis generation, open-ended discussion
+- LITERATURE_REVIEW: For researching background, finding citations, understanding field
+- START_PROJECT: For new complete analysis projects with data
+- WORK_ON_EXISTING: For continuing or iterating on an existing project
+- EXPLORE_DATASET: For data exploration, EDA, understanding what's in data"""},
+                {"role": "user", "content": f"Classify this request:\n\n{user_request}"}
+            ]
+            
+            response = await self.llm_backend.acomplete(messages)
+            
+            # Parse JSON response
+            response = response.strip()
+            if response.startswith("```"):
+                response = response.split("```")[1]
+                if response.startswith("json"):
+                    response = response[4:]
+                response = response.strip()
+            
+            data = json_module.loads(response)
+            workflow_str = data.get("workflow", "START_PROJECT").upper()
+            
+            # Map to enum
+            workflow_map = {
+                "BRAINSTORMING": MajorWorkflow.BRAINSTORMING,
+                "LITERATURE_REVIEW": MajorWorkflow.LITERATURE_REVIEW,
+                "START_PROJECT": MajorWorkflow.START_PROJECT,
+                "WORK_ON_EXISTING": MajorWorkflow.WORK_ON_EXISTING,
+                "EXPLORE_DATASET": MajorWorkflow.EXPLORE_DATASET,
+            }
+            
+            return workflow_map.get(workflow_str, MajorWorkflow.START_PROJECT)
+                    
+        except Exception:
+            # Fall back to START_PROJECT on any error
             return MajorWorkflow.START_PROJECT
     
     async def _execute_workflow(self, workflow_name: str) -> WorkflowResult:
@@ -523,6 +597,10 @@ If unclear, ask a clarifying question using the user_input tool.""",
             inputs["responsibilities"] = context["responsibilities"]
         if "analysis_results" in context:
             inputs["analysis_results"] = context["analysis_results"]
+        
+        # Pass token budget to workflows that can use it for mode selection
+        if self._token_budget:
+            inputs["token_budget"] = self._token_budget
         if "validation_report" in context:
             inputs["validation_report"] = context["validation_report"]
         if "final_report" in context:
@@ -537,6 +615,65 @@ If unclear, ask a clarifying question using the user_input tool.""",
             inputs["research_topic"] = context["user_request"]
         
         return inputs
+    
+    def _show_post_consultation_summary(self, result: WorkflowResult) -> None:
+        """
+        Show a summary after consultation is complete.
+        
+        Confirms to user what was decided: token budget, scope, and next steps.
+        """
+        from ..utils import console
+        
+        outputs = result.outputs or {}
+        
+        # Build summary message
+        lines = []
+        lines.append("")
+        lines.append("━" * 60)
+        lines.append("  📋 CONSULTATION SUMMARY")
+        lines.append("━" * 60)
+        
+        # Token budget
+        budget = outputs.get("token_budget")
+        if budget:
+            budget_tier = "Quick" if budget < 200_000 else "Thorough" if budget < 700_000 else "Comprehensive"
+            estimated_cost = (budget / 1_000_000) * 5.00  # Empirical ~$5/M tokens (input + output combined)
+            lines.append(f"  💰 Token Budget: {budget:,} tokens ({budget_tier}, ~${estimated_cost:.2f})")
+        
+        # Recommended workflow
+        workflow = outputs.get("recommended_workflow", "start_project")
+        workflow_names = {
+            "start_project": "Full Analysis Pipeline",
+            "literature_review": "Literature Review Only",
+            "brainstorming": "Brainstorming Session",
+            "explore_dataset": "Data Exploration",
+        }
+        lines.append(f"  🔬 Workflow: {workflow_names.get(workflow, workflow)}")
+        
+        # Data detected
+        data_manifest = outputs.get("data_manifest", {})
+        if data_manifest.get("files"):
+            file_count = len(data_manifest["files"])
+            total_rows = data_manifest.get("summary", {}).get("total_rows", 0)
+            lines.append(f"  📊 Data: {file_count} file(s), {total_rows:,} rows")
+        
+        lines.append("━" * 60)
+        lines.append("")
+        
+        # Print the summary
+        for line in lines:
+            print(line)
+        
+        # Log to transcript
+        self.transcript.log_system_event(
+            "consultation_complete",
+            "Consultation phase completed",
+            {
+                "token_budget": budget,
+                "workflow": workflow,
+                "data_files": len(data_manifest.get("files", [])) if data_manifest else 0,
+            }
+        )
     
     def _scan_data_paths(self) -> list[str]:
         """Scan ReadData directory for available data files."""
@@ -619,6 +756,7 @@ Write a concise summary (2-3 paragraphs) that:
 4. Suggests next steps if applicable
 
 This summary will be presented to the user.""",
+            project_name=self.session.project_name,
         )
         
         summary = summary_result.get("response", self._simple_summary())
@@ -640,130 +778,132 @@ This summary will be presented to the user.""",
     
     async def _generate_project_name_interactive(self, request: str) -> str:
         """
-        Have Bohr generate a project name and confirm with user.
+        Have Bohr generate a project name via structured JSON response.
         
         Checks for existing projects that might be relevant.
         """
         from ..utils import console
+        import json as json_module
         
-        # Generate intelligent project name
-        suggested = self._generate_smart_project_name(request)
-        
-        # Check for existing projects with similar themes
+        # Check for existing projects
         existing_projects = []
-        related_projects = []
         if self.SANDBOX_ROOT.exists():
             existing_projects = [
                 d.name for d in self.SANDBOX_ROOT.iterdir()
                 if d.is_dir() and (d / "session.json").exists()
             ]
+        
+        # Have Bohr suggest a project name via LLM with JSON response
+        existing_list = "\n".join(f"  - {p}" for p in existing_projects[:10]) if existing_projects else "  (none)"
+        
+        messages = [
+            {"role": "system", "content": """You are Bohr, the MiniLab project orchestrator. 
+Generate a concise project name based on the user's request.
+
+RESPOND WITH ONLY A JSON OBJECT in this exact format:
+{"project_name": "short_descriptive_name", "is_continuation": false, "continue_project": null}
+
+Rules for project_name:
+- Use snake_case (lowercase with underscores)
+- Keep it short (2-4 words max)
+- Include key subject matter and analysis type
+- Add YYYYMMDD date suffix
+- Example: "pluvicto_survival_20241211"
+
+If the request mentions continuing an existing project, set:
+- is_continuation: true
+- continue_project: "exact_project_name_from_list"
+"""},
+            {"role": "user", "content": f"""User Request: {request}
+
+Existing Projects:
+{existing_list}
+
+Today's Date: {datetime.now().strftime("%Y%m%d")}
+
+Generate project name JSON:"""}
+        ]
+        
+        try:
+            response = await self.llm_backend.acomplete(messages)
             
-            # Only show truly related projects (same dataset/topic, not random word matches)
-            key_identifiers = self._extract_key_identifiers(request)
-            if key_identifiers:
-                related_projects = [
-                    p for p in existing_projects 
-                    if any(ident.lower() in p.lower() for ident in key_identifiers)
-                ]
-        
-        # Build prompt for user
-        console.agent_message("BOHR", f"I suggest we call this project: \033[1m{suggested}\033[0m")
-        
-        if related_projects:
-            print(f"\n  Related existing projects you may want to continue:")
-            for p in related_projects[:3]:
-                print(f"    • {p}")
-        
-        print(f"\n  Press Enter to accept, or type a different name:")
-        
-        user_input = input("\n  \033[1;32m▶\033[0m ").strip()
-        
-        if user_input:
-            project_name = user_input.replace(" ", "_")
-        else:
-            project_name = suggested
-        
-        # Confirm
-        if project_name in existing_projects:
-            console.agent_message("BOHR", f"Resuming project: {project_name}")
-        else:
-            console.agent_message("BOHR", f"Creating project: {project_name}")
-        
-        return project_name
-    
-    def _extract_key_identifiers(self, request: str) -> list[str]:
-        """
-        Extract key identifiers from request (dataset names, specific terms).
-        
-        These are proper nouns, paths, or domain-specific terms.
-        """
-        identifiers = []
-        
-        # Look for path references (ReadData/Something, Sandbox/Something)
-        import re
-        path_matches = re.findall(r'(?:ReadData|Sandbox)/(\w+)', request)
-        identifiers.extend(path_matches)
-        
-        # Look for capitalized terms (likely proper nouns/dataset names)
-        words = request.split()
-        for word in words:
-            # Clean punctuation
-            clean = re.sub(r'[^\w]', '', word)
-            # Proper nouns or acronyms
-            if clean and (clean[0].isupper() or clean.isupper()) and len(clean) > 2:
-                # Skip common sentence starters
-                if clean.lower() not in {'the', 'this', 'that', 'please', 'note', 'use', 'let', 'help'}:
-                    identifiers.append(clean)
-        
-        return list(set(identifiers))  # Dedupe
-    
-    def _generate_smart_project_name(self, request: str) -> str:
-        """
-        Generate an intelligent project name based on request content.
-        
-        Focuses on: dataset names, analysis type, key subject matter.
-        """
-        import re
-        
-        # Extract dataset/folder name from paths
-        path_matches = re.findall(r'(?:ReadData|Sandbox)/(\w+)', request)
-        dataset_name = path_matches[0] if path_matches else None
-        
-        # Detect analysis type
-        request_lower = request.lower()
-        analysis_type = None
-        if any(term in request_lower for term in ['explor', 'eda', 'understand', 'look at', 'examine']):
-            analysis_type = "exploration"
-        elif any(term in request_lower for term in ['predict', 'model', 'classifier', 'regression']):
-            analysis_type = "prediction"
-        elif any(term in request_lower for term in ['review', 'literature', 'background']):
-            analysis_type = "literature_review"
-        elif any(term in request_lower for term in ['correlat', 'associat', 'relationship']):
-            analysis_type = "association"
-        elif any(term in request_lower for term in ['signature', 'biomarker', 'marker']):
-            analysis_type = "biomarker"
-        else:
-            analysis_type = "analysis"
-        
-        # Build name
-        if dataset_name:
-            name = f"{dataset_name}_{analysis_type}"
-        else:
-            # Fall back to extracting key terms
-            identifiers = self._extract_key_identifiers(request)
-            if identifiers:
-                name = f"{identifiers[0]}_{analysis_type}"
+            # Parse JSON response
+            # Handle potential markdown code blocks
+            response = response.strip()
+            if response.startswith("```"):
+                response = response.split("```")[1]
+                if response.startswith("json"):
+                    response = response[4:]
+                response = response.strip()
+            
+            data = json_module.loads(response)
+            suggested_name = data.get("project_name", "project_" + datetime.now().strftime("%Y%m%d"))
+            is_continuation = data.get("is_continuation", False)
+            continue_project = data.get("continue_project")
+            
+            # If Bohr identified this as continuing an existing project
+            if is_continuation and continue_project and continue_project in existing_projects:
+                console.agent_message("BOHR", f"It looks like you want to continue: \033[1m{continue_project}\033[0m")
+                print(f"\n  Press Enter to confirm, or type a different project name:")
+                user_input = input("\n  \033[1;32m▶\033[0m ").strip()
+                
+                if user_input:
+                    return user_input.replace(" ", "_")
+                return continue_project
+            
+            # New project
+            console.agent_message("BOHR", f"I suggest we call this project: \033[1m{suggested_name}\033[0m")
+            
+            # Show related existing projects if any
+            related = [p for p in existing_projects if any(
+                word in p.lower() for word in suggested_name.lower().replace("_", " ").split()
+                if len(word) > 3
+            )][:3]
+            
+            if related:
+                print(f"\n  Related existing projects:")
+                for p in related:
+                    print(f"    • {p}")
+            
+            print(f"\n  Press Enter to accept, or type a different name:")
+            user_input = input("\n  \033[1;32m▶\033[0m ").strip()
+            
+            if user_input:
+                project_name = user_input.replace(" ", "_")
             else:
-                name = analysis_type
-        
-        # Add date
-        timestamp = datetime.now().strftime("%Y%m%d")
-        return f"{name}_{timestamp}"
+                project_name = suggested_name
+            
+            # Confirm
+            if project_name in existing_projects:
+                console.agent_message("BOHR", f"Resuming project: {project_name}")
+            else:
+                console.agent_message("BOHR", f"Creating project: {project_name}")
+            
+            return project_name
+            
+        except Exception as e:
+            # Fallback to simple timestamp-based name
+            console.warning(f"Could not generate smart name: {e}")
+            fallback = f"project_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            console.agent_message("BOHR", f"Using default project name: {fallback}")
+            return fallback
     
     def interrupt(self) -> None:
         """Request graceful interruption of current workflow."""
         self._interrupt_requested = True
-        self._log("Interrupt requested")
+        # Propagate interrupt to all agents
+        for agent in self.agents.values():
+            agent.request_interrupt()
+        self._log("Interrupt requested - all agents notified")
+    
+    def request_exit(self) -> None:
+        """Request immediate exit, interrupting all agents."""
+        self._exit_requested = True
+        self._interrupt_requested = True
+        # Propagate interrupt to all agents immediately
+        for agent in self.agents.values():
+            agent.request_interrupt()
+        self._log("Exit requested - all agents interrupted", console_print=False)
     
     def _log(self, message: str, console_print: bool = True) -> None:
         """Log orchestrator message."""
@@ -783,36 +923,110 @@ This summary will be presented to the user.""",
 async def run_minilab(
     request: str,
     project_name: Optional[str] = None,
-    workflow: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Convenience function to run MiniLab.
     
+    All sessions flow through consultation - no workflow shortcuts.
+    Handles SIGINT (Ctrl+C) gracefully with user options.
+    
     Args:
         request: User's analysis request
         project_name: Optional project name
-        workflow: Optional explicit workflow name
         
     Returns:
         Results dictionary
     """
+    import signal
+    from ..utils import console, Spinner
+    
     orchestrator = BohrOrchestrator()
     
-    # Start session
-    await orchestrator.start_session(
-        user_request=request,
-        project_name=project_name,
-    )
-    
-    # Parse workflow if specified
-    major_workflow = None
-    if workflow:
+    def handle_interrupt(signum, frame):
+        """Handle Ctrl+C with user options."""
+        # Pause any running spinner
+        was_spinning = Spinner.pause_for_input()
+        
+        print("\n")
+        console.info("⏸️  Interrupted! What would you like to do?")
+        print("  1. Pause and provide guidance to the current workflow")
+        print("  2. Skip to next workflow phase")
+        print("  3. Save progress and exit")
+        print("  4. Continue (cancel interrupt)")
+        print()
+        
         try:
-            major_workflow = MajorWorkflow(workflow.lower())
-        except ValueError:
-            print(f"Unknown workflow: {workflow}, will auto-detect")
+            choice = input("  \033[1;32m▶ Your choice (1-4):\033[0m ").strip()
+        except (EOFError, KeyboardInterrupt):
+            choice = "3"  # Default to save and exit on double Ctrl+C
+        
+        if was_spinning:
+            Spinner.resume_after_input()
+        
+        if choice == "1":
+            # Get user guidance
+            Spinner.pause_for_input()
+            try:
+                guidance = input("  \033[1;32m▶ Your guidance:\033[0m ").strip()
+                if guidance:
+                    orchestrator.session.context["user_guidance"] = guidance
+                    console.info("Guidance noted. Continuing...")
+            except (EOFError, KeyboardInterrupt):
+                pass
+            Spinner.resume_after_input()
+        elif choice == "2":
+            console.info("Skipping to next workflow phase...")
+            orchestrator.interrupt()
+        if choice == "3":
+            console.info("Saving progress and exiting...")
+            if orchestrator.session:
+                orchestrator.session.save()
+                console.info(f"Progress saved to: {orchestrator.session.project_path}")
+            # Request immediate exit with agent interruption
+            orchestrator.request_exit()
+            return  # Return from handler, main loop will check flag
+        else:
+            console.info("Continuing...")
     
-    # Run
-    results = await orchestrator.run(major_workflow=major_workflow)
+    # Install signal handler
+    original_handler = signal.signal(signal.SIGINT, handle_interrupt)
     
-    return results
+    try:
+        # Start session
+        await orchestrator.start_session(
+            user_request=request,
+            project_name=project_name,
+        )
+        
+        # Run - workflow determined by consultation
+        # Check for exit request after each major operation
+        if orchestrator._exit_requested:
+            return {"status": "interrupted", "message": "User requested exit"}
+        
+        results = await orchestrator.run()
+        
+        # Print timing report if enabled
+        if os.environ.get("MINILAB_TIMING") == "1":
+            from ..utils.timing import timing
+            print()
+            timing().print_report()
+        
+        # Print token usage summary
+        if hasattr(orchestrator.llm_backend, 'token_usage'):
+            usage = orchestrator.llm_backend.token_usage
+            if usage.get("total_tokens", 0) > 0:
+                print()
+                console.info(f"📊 Token Usage: {usage['input_tokens']:,} in + {usage['output_tokens']:,} out = {usage['total_tokens']:,} total")
+                if usage.get("cache_read_tokens", 0) > 0:
+                    console.info(f"   Cache: {usage['cache_read_tokens']:,} read, {usage.get('cache_creation_tokens', 0):,} created")
+        
+        return results
+    except KeyboardInterrupt:
+        # Handle any uncaught keyboard interrupts gracefully
+        console.warning("Session interrupted")
+        if orchestrator.session:
+            orchestrator.session.save()
+        return {"status": "interrupted", "message": "Session interrupted by user"}
+    finally:
+        # Restore original signal handler
+        signal.signal(signal.SIGINT, original_handler)
