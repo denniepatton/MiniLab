@@ -6,11 +6,13 @@ Handles:
 - Creating LLM backends
 - Creating tool instances per agent
 - Setting up colleague relationships
+- Injecting session date into prompts
 """
 
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -41,6 +43,7 @@ class AgentRegistry:
     - Typed tools with permissions
     - LLM backends
     - Colleague relationships
+    - Session date injection
     """
     
     def __init__(
@@ -49,6 +52,7 @@ class AgentRegistry:
         context_manager: ContextManager,
         tool_factory: ToolFactory,
         default_model: str = DEFAULT_MODEL,
+        session_date: Optional[datetime] = None,
     ):
         """
         Initialize registry.
@@ -58,19 +62,23 @@ class AgentRegistry:
             context_manager: Shared context manager
             tool_factory: Factory for creating tools
             default_model: Default LLM model to use
+            session_date: Session start date (for injection into prompts)
         """
         self.workspace_root = workspace_root
         self.context_manager = context_manager
         self.tool_factory = tool_factory
         self.default_model = default_model
+        self.session_date = session_date or datetime.now()
         
         self._agents: dict[str, Agent] = {}
         self._llm_backends: dict[str, Any] = {}
     
-    def _create_llm_backend(self, model: str) -> Any:
+    def _create_llm_backend(self, model: str, agent_id: str = "unknown") -> Any:
         """Create LLM backend for a model string."""
-        if model in self._llm_backends:
-            return self._llm_backends[model]
+        # Create a unique key including agent_id for per-agent tracking
+        cache_key = f"{model}:{agent_id}"
+        if cache_key in self._llm_backends:
+            return self._llm_backends[cache_key]
         
         # Parse model string (e.g., "anthropic:claude-sonnet-4-20250514")
         if ":" in model:
@@ -88,16 +96,18 @@ class AgentRegistry:
             backend = AnthropicBackend(
                 api_key=os.getenv("ANTHROPIC_API_KEY"),
                 model=model_name,
+                agent_id=agent_id,
             )
         elif provider == "openai":
             backend = OpenAIBackend(
                 api_key=os.getenv("OPENAI_API_KEY"),
                 model=model_name,
+                agent_id=agent_id,
             )
         else:
             raise ValueError(f"Unknown LLM provider: {provider}")
         
-        self._llm_backends[model] = backend
+        self._llm_backends[cache_key] = backend
         return backend
     
     def create_agent(
@@ -133,11 +143,17 @@ class AgentRegistry:
         # Get tool documentation
         tools_doc = self.tool_factory.get_tool_documentation(agent_id)
         
-        # Build full system prompt
-        system_prompt = prompt.format_system_prompt(tools_doc)
+        # Format session date for prompt
+        session_date_str = self.session_date.strftime("%B %d, %Y")
         
-        # Create LLM backend
-        llm = self._create_llm_backend(model)
+        # Build full system prompt with session date
+        system_prompt = prompt.format_system_prompt(
+            tools_documentation=tools_doc,
+            session_date=session_date_str,
+        )
+        
+        # Create LLM backend with agent_id for token tracking
+        llm = self._create_llm_backend(model, agent_id=agent_id)
         
         # Determine guild
         guild = None
@@ -225,6 +241,7 @@ def create_agents(
     permission_callback: Optional[Callable[[str], bool]] = None,
     model: str = DEFAULT_MODEL,
     enable_async_context: bool = True,
+    session_date: datetime = None,
 ) -> tuple[dict[str, Agent], ContextManager, ToolFactory]:
     """
     Convenience function to create all agents with full setup.
@@ -235,6 +252,7 @@ def create_agents(
         permission_callback: Callback for permission requests
         model: LLM model to use
         enable_async_context: Enable background context updates
+        session_date: Session start date (for injection into prompts)
         
     Returns:
         Tuple of (agents dict, context_manager, tool_factory)
@@ -259,6 +277,7 @@ def create_agents(
         context_manager=context_manager,
         tool_factory=tool_factory,
         default_model=model,
+        session_date=session_date or datetime.now(),
     )
     
     agents = registry.create_all_agents(model)

@@ -56,15 +56,30 @@ class UserInputTool(Tool):
     
     Allows agents to pause and request user input at any time.
     This is the primary mechanism for agents to ask clarifying questions.
+    
+    The tool respects user preferences passed via context:
+    - If user indicated autonomous operation (e.g., "use your best judgment",
+      "don't ask me", "complete without consulting"), the tool will auto-proceed
+      with defaults or reasonable choices instead of blocking for input.
     """
     
     name = "user_input"
     description = "Ask the user questions or request confirmation"
     
+    # Phrases that indicate user wants autonomous operation
+    AUTONOMOUS_INDICATORS = [
+        "best judgment", "best judgement", "don't ask", "do not ask",
+        "without consulting", "autonomous", "independently", "proceed without",
+        "don't need to ask", "your discretion", "make the call",
+        "complete without", "finish without", "on your own",
+        "use your judgment", "use your judgement", "figure it out",
+    ]
+    
     def __init__(
         self,
         agent_id: str,
         input_callback: Optional[Callable[[str, Optional[list[str]]], str]] = None,
+        user_preferences: Optional[str] = None,
         **kwargs
     ):
         """
@@ -74,9 +89,28 @@ class UserInputTool(Tool):
             agent_id: The ID of the agent using this tool
             input_callback: Callback function to get user input
                            Signature: (prompt, choices) -> response
+            user_preferences: Natural language user preferences from consultation
         """
         super().__init__(agent_id, **kwargs)
         self.input_callback = input_callback
+        self._user_preferences = user_preferences or ""
+    
+    def set_user_preferences(self, preferences: str) -> None:
+        """Set user preferences (from consultation output)."""
+        self._user_preferences = preferences or ""
+    
+    def _should_auto_proceed(self) -> bool:
+        """
+        Check if user preferences indicate autonomous operation.
+        
+        This is NOT a binary flag - it's contextual interpretation of
+        natural language preferences.
+        """
+        if not self._user_preferences:
+            return False
+        
+        prefs_lower = self._user_preferences.lower()
+        return any(indicator in prefs_lower for indicator in self.AUTONOMOUS_INDICATORS)
     
     def set_input_callback(self, callback: Callable[[str, Optional[list[str]]], str]) -> None:
         """Set the input callback after initialization."""
@@ -113,6 +147,20 @@ class UserInputTool(Tool):
     
     async def _ask(self, params: AskInput) -> UserInputOutput:
         """Ask the user a question."""
+        # Check if user preferences indicate autonomous operation
+        if self._should_auto_proceed():
+            # Auto-proceed with default or first choice
+            auto_response = params.default
+            if not auto_response and params.choices:
+                auto_response = params.choices[0]  # Pick first reasonable option
+            if not auto_response:
+                auto_response = "Proceeding with best judgment"
+            
+            return UserInputOutput(
+                success=True,
+                response=auto_response,
+            )
+        
         if not self.input_callback:
             return UserInputOutput(
                 success=False,

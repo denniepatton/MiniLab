@@ -103,13 +103,19 @@ class AnthropicBackend(LLMBackend):
     
     Features:
     - Prompt caching for system prompts (reduces costs by up to 90% on cache hits)
-    - Token usage tracking
+    - Token usage tracking (both local and via TokenAccount singleton)
     - Automatic retries on transient errors
     """
 
-    def __init__(self, model: str, api_key: str | None = None):
+    def __init__(
+        self, 
+        model: str, 
+        api_key: str | None = None,
+        agent_id: str = "unknown",
+    ):
         self.model = model
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self.agent_id = agent_id  # For token tracking
         if not self.api_key:
             raise RuntimeError("ANTHROPIC_API_KEY not set")
 
@@ -118,7 +124,7 @@ class AnthropicBackend(LLMBackend):
             timeout=180.0,  # Increased to 3 minutes for complex responses
         )
         
-        # Token usage tracking
+        # Token usage tracking (local to this backend)
         self._total_input_tokens = 0
         self._total_output_tokens = 0
         self._total_cache_creation_tokens = 0
@@ -135,12 +141,33 @@ class AnthropicBackend(LLMBackend):
             "total_tokens": self._total_input_tokens + self._total_output_tokens,
         }
     
-    def _update_token_usage(self, usage: dict) -> None:
-        """Update token usage from API response."""
-        self._total_input_tokens += usage.get("input_tokens", 0)
-        self._total_output_tokens += usage.get("output_tokens", 0)
-        self._total_cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
-        self._total_cache_read_tokens += usage.get("cache_read_input_tokens", 0)
+    def _update_token_usage(self, usage: dict, operation: str = "llm.complete") -> None:
+        """Update token usage from API response - both local and global."""
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cache_creation = usage.get("cache_creation_input_tokens", 0)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        
+        # Update local tracking
+        self._total_input_tokens += input_tokens
+        self._total_output_tokens += output_tokens
+        self._total_cache_creation_tokens += cache_creation
+        self._total_cache_read_tokens += cache_read
+        
+        # Update global TokenAccount
+        try:
+            from ..core import get_token_account
+            account = get_token_account()
+            account.debit(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                agent_id=self.agent_id,
+                operation=operation,
+                cache_creation=cache_creation,
+                cache_read=cache_read,
+            )
+        except ImportError:
+            pass  # TokenAccount not available
 
     async def acomplete(
         self,

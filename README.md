@@ -344,6 +344,25 @@ MiniLab is inspired by and builds upon ideas from:
 - Timestamp utilities to prevent date hallucination
 - Post-consultation summary showing confirmed scope and budget
 
+### Version 0.3.2 (December 2025)
+- **Intelligent Budget Allocation**: Bohr reserves 10% buffer for graceful completion, never exceeds budget
+- **Contextual Autonomy**: Natural language user preferences flow through to agent tools (no hardcoded levels)
+- **Budget Typo Handling**: Fixes common typos like "200l" → "200k", warns on ambiguous input
+- **Hard Budget Enforcement**: `BudgetExceededError` exception and agent ReAct loop budget checks
+- **User Preference Propagation**: Consultation captures "best judgment"/"without consulting" preferences
+- **Auto-proceed in Autonomous Mode**: `user_input` tool respects user's autonomy preferences
+- **Graceful Completion**: Always finishes cleanly, skips to writeup when budget is low
+
+### Version 0.3.1 (December 2025)
+- **TokenAccount**: Real-time token budget tracking with warnings at 60/80/95% thresholds
+- **ProjectWriter**: Centralized output management preventing duplicate files
+- **Complete Transcript System**: Full lab notebook capturing all agent conversations, reasoning, and tool use
+- **Date Injection**: Current session date injected into all agent prompts (fixes date hallucination)
+- **Conditional data_manifest.md**: Only created when data files are present
+- **Single session_summary.md**: Prevented duplicate file creation by agents
+- **Output Guidelines**: Agents instructed not to create redundant files (executive_summary.md, etc.)
+- Budget warnings displayed to agents as they approach token limits
+
 ### Version 0.2.0 (December 2025)
 - Complete architecture refactor
 - PathGuard security system

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minilab"
-version = "0.3.0"
+version = "0.3.2"
 description = "MiniLab: multi-agent scientific lab assistant with RAG and workflow orchestration"
 authors = [{ name = "Robert Patton" }]
 readme = "README.md"

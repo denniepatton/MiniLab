@@ -117,6 +117,18 @@ class ToolFactory:
             if tool and isinstance(tool, UserInputTool):
                 tool.set_input_callback(callback)
     
+    def set_user_preferences(self, preferences: str) -> None:
+        """
+        Set user preferences on all user_input tools.
+        
+        This passes the user's natural language preferences (from consultation)
+        to enable contextual autonomy decisions.
+        """
+        for agent_id in AGENT_TOOL_PERMISSIONS:
+            tool = self.registry.get_tool(agent_id, "user_input")
+            if tool and isinstance(tool, UserInputTool):
+                tool.set_user_preferences(preferences)
+    
     def set_permission_callback(self, callback: Callable[[str], bool]) -> None:
         """Set the permission request callback."""
         self.permission_callback = callback

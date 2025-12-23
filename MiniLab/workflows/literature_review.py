@@ -32,13 +32,9 @@ class LiteratureReviewModule(WorkflowModule):
     """
     LITERATURE REVIEW: Background research and context gathering.
     
-    Supports two modes:
-    - QUICK: 3 steps, ~10 papers, 1 agent (Gould)
-    - COMPREHENSIVE: 7 steps, ~30 papers, 3 agents (Gould, Farber, Feynman)
-    
-    Mode is determined by token budget:
-    - Budget < 300K: Quick mode
-    - Budget >= 300K: Comprehensive mode
+    Scope and depth are AGENT-DRIVEN based on project needs,
+    not hardcoded thresholds. Gould assesses the topic complexity
+    and decides how thorough to be.
     
     Purpose:
         - Search relevant literature (PubMed, arXiv)
@@ -53,23 +49,19 @@ class LiteratureReviewModule(WorkflowModule):
     Outputs:
         - bibliography: Formatted reference list
         - literature_summary: Synthesis of key findings
-        - methodology_notes: Relevant methods identified (comprehensive only)
-        - knowledge_gaps: Identified gaps in literature (comprehensive only)
+        - methodology_notes: Relevant methods identified (if comprehensive)
+        - knowledge_gaps: Identified gaps in literature (if comprehensive)
     """
     
     name = "literature_review"
     description = "Background research and literature synthesis"
     
     required_inputs = ["research_topic", "project_spec"]
-    optional_inputs = ["specific_queries", "max_papers", "target_citations", "token_budget", "review_mode"]
+    optional_inputs = ["specific_queries", "max_papers", "target_citations", "token_budget", "review_mode", "user_preferences"]
     expected_outputs = ["bibliography", "literature_summary", "methodology_notes", "knowledge_gaps"]
     
     primary_agents = ["gould"]
     supporting_agents = ["farber", "feynman"]
-    
-    # Mode constants
-    MODE_QUICK = "quick"
-    MODE_COMPREHENSIVE = "comprehensive"
     
     async def execute(
         self,
@@ -79,19 +71,9 @@ class LiteratureReviewModule(WorkflowModule):
         """
         Execute literature review workflow.
         
-        Quick Mode (3 steps, ~5-10 papers):
-        1. Generate search queries + Search both PubMed and arXiv
-        2. Synthesize findings into summary
-        3. Compile bibliography
-        
-        Comprehensive Mode (7 steps, ~20-30 papers):
-        1. Generate search queries from topic
-        2. Search PubMed for biomedical literature
-        3. Search arXiv for computational methods
-        4. Critical assessment of relevance (Farber)
-        5. Technical methodology analysis (Feynman)
-        6. Synthesize findings into summary
-        7. Compile bibliography
+        AGENT-DRIVEN: Gould assesses the topic and decides scope dynamically.
+        No hardcoded mode selection - the agent determines appropriate depth
+        based on topic complexity, user preferences, and available budget.
         """
         # Validate inputs
         valid, missing = self.validate_inputs(inputs)
@@ -101,16 +83,10 @@ class LiteratureReviewModule(WorkflowModule):
                 error=f"Missing required inputs: {missing}",
             )
         
-        # Determine mode based on token budget or explicit setting
-        token_budget = inputs.get("token_budget", 500_000)
-        review_mode = inputs.get("review_mode")
-        
-        if review_mode:
-            mode = review_mode
-        elif token_budget and token_budget < 300_000:
-            mode = self.MODE_QUICK
-        else:
-            mode = self.MODE_COMPREHENSIVE
+        # Extract context for agent decision-making
+        token_budget = inputs.get("token_budget")
+        user_preferences = inputs.get("user_preferences", "")
+        explicit_mode = inputs.get("review_mode")  # Only if user explicitly requested
         
         # Restore or initialize state
         if checkpoint:
@@ -121,7 +97,8 @@ class LiteratureReviewModule(WorkflowModule):
             self._state = {
                 "research_topic": inputs["research_topic"],
                 "project_spec": inputs["project_spec"],
-                "mode": mode,
+                "user_preferences": user_preferences,
+                "token_budget": token_budget,
                 "search_queries": [],
                 "pubmed_results": [],
                 "arxiv_results": [],
@@ -129,15 +106,260 @@ class LiteratureReviewModule(WorkflowModule):
                 "bibliography": [],
             }
         
-        # Set paper limits based on mode
-        if mode == self.MODE_QUICK:
-            max_papers = inputs.get("max_papers", 10)
-            self._log_step(f"Starting QUICK literature review (~{max_papers} papers)")
-            return await self._execute_quick_mode(inputs, max_papers)
-        else:
-            max_papers = inputs.get("max_papers", 25)
-            self._log_step(f"Starting COMPREHENSIVE literature review (~{max_papers} papers)")
-            return await self._execute_comprehensive_mode(inputs, max_papers)
+        # Let Gould decide how to approach this review
+        return await self._execute_agent_driven_review(inputs, explicit_mode)
+    
+    async def _execute_agent_driven_review(
+        self, 
+        inputs: dict[str, Any],
+        explicit_mode: Optional[str] = None
+    ) -> WorkflowResult:
+        """
+        Execute literature review with agent-driven scope decisions.
+        
+        Gould assesses the topic complexity and decides:
+        - How many searches to run
+        - How many papers to include
+        - Whether to involve other agents (Farber for critique, Feynman for methods)
+        - How deep to go on methodology analysis
+        
+        No hardcoded limits - agent reasoning determines scope.
+        """
+        from ..utils import console
+        
+        try:
+            # Step 1: Gould assesses the topic and plans the review
+            if self._current_step <= 0:
+                console.info("Gould assessing topic and planning review scope...")
+                
+                user_prefs = self._state.get("user_preferences", "")
+                budget_context = ""
+                if self._state.get("token_budget"):
+                    budget_context = f"\nToken budget for this session: {self._state['token_budget']:,} tokens. Be mindful of this when deciding scope."
+                
+                planning_result = await self._run_agent_task(
+                    agent_name="gould",
+                    task=f"""Assess this research topic and plan an appropriate literature review.
+
+Research Topic: {inputs['research_topic']}
+
+Project Context:
+{inputs['project_spec'][:1500]}
+
+User Preferences: {user_prefs if user_prefs else "None specified"}
+{budget_context}
+{"User explicitly requested: " + explicit_mode + " mode" if explicit_mode else ""}
+
+Your task:
+1. Assess the COMPLEXITY of this topic:
+   - Is it a narrow, well-defined area or a broad interdisciplinary topic?
+   - How much prior work exists?
+   - Are there specialized methodological papers we need?
+
+2. PLAN your approach (output as JSON at the end):
+   - num_search_queries: How many distinct search queries (2-10)
+   - papers_per_query: Results per query (3-10)
+   - include_methodology_analysis: true/false (involve Feynman for technical papers?)
+   - include_critical_assessment: true/false (involve Farber for quality review?)
+   - search_sources: ["pubmed", "arxiv"] or just one if appropriate
+   
+3. Generate your search queries based on the topic.
+
+End your response with a JSON block:
+```json
+{{"num_search_queries": N, "papers_per_query": N, "include_methodology_analysis": bool, "include_critical_assessment": bool, "search_sources": [...], "queries": [...]}}
+```""",
+                )
+                
+                # Parse Gould's plan
+                plan = self._parse_review_plan(planning_result.get("response", ""))
+                self._state["review_plan"] = plan
+                self._state["search_queries"] = plan.get("queries", [])
+                self._current_step = 1
+                self.save_checkpoint()
+            
+            # Step 2: Execute searches based on plan
+            if self._current_step <= 1:
+                plan = self._state.get("review_plan", {})
+                queries = self._state.get("search_queries", [])
+                sources = plan.get("search_sources", ["pubmed", "arxiv"])
+                papers_per_query = plan.get("papers_per_query", 5)
+                
+                console.info(f"Searching {len(queries)} queries across {', '.join(sources)}...")
+                
+                search_result = await self._run_agent_task(
+                    agent_name="gould",
+                    task=f"""Execute these literature searches:
+
+Queries: {queries}
+Sources to search: {sources}
+Results per query: {papers_per_query}
+
+For each query, search the specified sources and capture:
+- Title, Authors, Year
+- PMID/arXiv ID/DOI
+- Brief relevance note
+
+Focus on quality over quantity. Include foundational works even if older.""",
+                )
+                
+                self._state["search_results"] = search_result.get("response", "")
+                self._current_step = 2
+                self.save_checkpoint()
+            
+            # Step 3: Optional methodology analysis (if Gould decided it's needed)
+            plan = self._state.get("review_plan", {})
+            if self._current_step <= 2 and plan.get("include_methodology_analysis", False):
+                console.info("Feynman analyzing methodological papers...")
+                
+                method_result = await self._run_agent_task(
+                    agent_name="feynman",
+                    task=f"""Review the methodological aspects of these papers.
+
+Research Topic: {inputs['research_topic']}
+
+Papers Found:
+{self._state['search_results']}
+
+Identify:
+1. Key computational/statistical methods used
+2. Novel approaches that might be applicable
+3. Methodological limitations noted
+4. Technical implementation details worth noting
+
+Focus on the 'how' - what techniques enable this research?""",
+                )
+                
+                self._state["methodology_notes"] = method_result.get("response", "")
+                self._current_step = 3
+                self.save_checkpoint()
+            elif self._current_step <= 2:
+                self._current_step = 3
+            
+            # Step 4: Optional critical assessment (if Gould decided it's needed)
+            if self._current_step <= 3 and plan.get("include_critical_assessment", False):
+                console.info("Farber providing critical assessment...")
+                
+                critique_result = await self._run_agent_task(
+                    agent_name="farber",
+                    task=f"""Critically assess the relevance and quality of this literature.
+
+Research Topic: {inputs['research_topic']}
+
+Papers Found:
+{self._state['search_results']}
+
+Assess:
+1. Are there key papers missing?
+2. Any bias in the coverage (methods, time period, geography)?
+3. Quality concerns with any cited works?
+4. Gaps in the literature that could be addressed?
+
+Be constructive but thorough.""",
+                )
+                
+                self._state["critical_assessment"] = critique_result.get("response", "")
+                self._current_step = 4
+                self.save_checkpoint()
+            elif self._current_step <= 3:
+                self._current_step = 4
+            
+            # Step 5: Synthesize into summary
+            if self._current_step <= 4:
+                console.info("Synthesizing findings...")
+                
+                extra_context = ""
+                if self._state.get("methodology_notes"):
+                    extra_context += f"\n\nMethodology Analysis:\n{self._state['methodology_notes']}"
+                if self._state.get("critical_assessment"):
+                    extra_context += f"\n\nCritical Assessment:\n{self._state['critical_assessment']}"
+                
+                synthesis_result = await self._run_agent_task(
+                    agent_name="gould",
+                    task=f"""Synthesize the literature into a coherent summary.
+
+Research Topic: {inputs['research_topic']}
+
+Search Results:
+{self._state['search_results']}
+{extra_context}
+
+Write a literature summary that:
+1. Introduces the research area and its significance
+2. Presents key findings from the most relevant papers
+3. Notes methodological approaches (if methodology analysis was done)
+4. Identifies gaps and opportunities
+5. Provides context for the planned analysis
+
+Write in engaging, narrative prose. Cite papers appropriately.""",
+                )
+                
+                self._state["literature_summary"] = synthesis_result.get("response", "")
+                self._current_step = 5
+                self.save_checkpoint()
+            
+            # Step 6: Compile bibliography
+            if self._current_step <= 5:
+                console.info("Compiling bibliography...")
+                
+                bib_result = await self._run_agent_task(
+                    agent_name="gould",
+                    task=f"""Compile the final bibliography.
+
+CRITICAL: Only include papers that were ACTUALLY FOUND during searches.
+Do NOT invent or hallucinate any references.
+
+Search Results:
+{self._state['search_results']}
+
+Format as numbered Markdown list:
+1. Authors. (Year). Title. Journal/Source. DOI/PMID/arXiv ID.
+
+Sort by relevance to our research topic, not alphabetically.""",
+                )
+                
+                self._state["bibliography"] = bib_result.get("response", "")
+                self._current_step = 6
+            
+            # Write outputs
+            return self._write_outputs(inputs)
+            
+        except Exception as e:
+            self._status = WorkflowStatus.FAILED
+            self._log_step(f"Error: {str(e)}")
+            self.save_checkpoint()
+            return WorkflowResult(status=WorkflowStatus.FAILED, error=str(e))
+    
+    def _parse_review_plan(self, response: str) -> dict:
+        """Parse Gould's review plan from the response."""
+        import json
+        import re
+        
+        # Try to find JSON block
+        json_match = re.search(r'```json\s*(\{[^`]+\})\s*```', response, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to find raw JSON
+        json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(0))
+            except json.JSONDecodeError:
+                pass
+        
+        # Default plan if parsing fails
+        return {
+            "num_search_queries": 3,
+            "papers_per_query": 5,
+            "include_methodology_analysis": False,
+            "include_critical_assessment": False,
+            "search_sources": ["pubmed", "arxiv"],
+            "queries": [],
+        }
     
     async def _execute_quick_mode(
         self, 
@@ -145,7 +367,7 @@ class LiteratureReviewModule(WorkflowModule):
         max_papers: int
     ) -> WorkflowResult:
         """
-        Execute quick 3-step literature review.
+        Legacy quick mode - kept for backwards compatibility.
         
         Single agent (Gould), combined searches, faster synthesis.
         """
@@ -166,13 +388,13 @@ Project Context:
 {inputs['project_spec'][:1000]}
 
 Instructions:
-1. Generate 2-3 targeted search queries
-2. Use pubmed.search for each query (max_results=5 per query)
-3. Use arxiv.search for each query (max_results=5 per query)
+1. Generate targeted search queries based on the topic
+2. Use pubmed.search for each query
+3. Use arxiv.search for each query
 4. Emphasize recent publications (last 3-5 years) but include key foundational works
 5. For each paper, capture: Title, Authors, Year, PMID/arXiv ID, and key relevance
 
-Target: {max_papers} high-quality papers total. Focus on the MOST relevant work.""",
+Focus on the MOST relevant, high-quality papers.""",
                 )
                 
                 self._state["combined_results"] = search_result.get("response", "")
@@ -198,7 +420,7 @@ Write a focused summary (3-5 paragraphs) that:
 3. Notes any obvious gaps or opportunities
 4. Briefly mentions relevant methodological approaches
 
-Keep it concise but informative - this is a quick review, not a comprehensive analysis.""",
+Keep it concise but informative.""",
                 )
                 
                 self._state["literature_summary"] = synthesis_result.get("response", "")
@@ -211,7 +433,7 @@ Keep it concise but informative - this is a quick review, not a comprehensive an
                 
                 bib_result = await self._run_agent_task(
                     agent_name="gould",
-                    task=f"""Compile a brief bibliography from the search results.
+                    task=f"""Compile a bibliography from the search results.
 
 IMPORTANT: Only include papers that were actually found during searches. Do NOT invent references.
 
@@ -532,6 +754,60 @@ Group references by source (PubMed, arXiv) and sort by relevance to our research
                 error=str(e),
                 outputs=self._state,
             )
+    
+    def _write_outputs(self, inputs: dict[str, Any]) -> WorkflowResult:
+        """Write outputs for agent-driven literature review."""
+        output_dir = self.project_path / "literature"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        artifacts = []
+        
+        # Literature summary
+        summary_path = output_dir / "literature_summary.md"
+        with open(summary_path, "w") as f:
+            f.write(f"# Literature Review: {inputs['research_topic']}\n\n")
+            f.write("*Generated by MiniLab - Agent-driven review*\n\n")
+            f.write(self._state.get("literature_summary", ""))
+        artifacts.append(str(summary_path))
+        
+        # Methodology notes (if done)
+        if self._state.get("methodology_notes"):
+            methods_path = output_dir / "methodology_notes.md"
+            with open(methods_path, "w") as f:
+                f.write("# Methodological Analysis\n\n")
+                f.write(self._state["methodology_notes"])
+            artifacts.append(str(methods_path))
+        
+        # Bibliography
+        bib_path = output_dir / "references.md"
+        with open(bib_path, "w") as f:
+            f.write(f"# References: {inputs['research_topic']}\n\n")
+            f.write("*Bibliography generated by MiniLab*\n\n")
+            f.write(self._state.get("bibliography", ""))
+        artifacts.append(str(bib_path))
+        
+        self._status = WorkflowStatus.COMPLETED
+        self._log_step("Literature review completed")
+        
+        # Count references
+        bib_content = self._state.get("bibliography", "")
+        ref_count = max(
+            bib_content.count("PMID:") + bib_content.count("arXiv:"),
+            bib_content.count("- "),
+            len([line for line in bib_content.split('\n') if line.strip().startswith(('1.', '2.', '3.'))])
+        )
+        
+        return WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            outputs={
+                "bibliography": self._state.get("bibliography", ""),
+                "literature_summary": self._state.get("literature_summary", ""),
+                "methodology_notes": self._state.get("methodology_notes", ""),
+                "knowledge_gaps": self._state.get("critical_assessment", ""),
+            },
+            artifacts=artifacts,
+            summary=f"Literature review complete. {ref_count} references compiled.",
+        )
     
     def _write_quick_outputs(self, inputs: dict[str, Any]) -> WorkflowResult:
         """Write outputs for quick mode (consolidated single file)."""

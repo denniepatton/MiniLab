@@ -5,6 +5,7 @@ A sophisticated multi-agent system for conducting scientific data analysis,
 literature review, and research assistance.
 
 Architecture:
+- core/: TokenAccount and ProjectWriter for centralized management
 - security/: PathGuard for file access control
 - tools/: Typed tool system with Pydantic validation
 - context/: RAG-based context management with FAISS
@@ -21,11 +22,14 @@ Quick Start:
     )
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.3"
+
+# Core components
+from .core import TokenAccount, get_token_account, ProjectWriter, BudgetExceededError
 
 # Core exports
 from .orchestrators import BohrOrchestrator, MiniLabSession
-from .orchestrators.bohr_orchestrator import run_minilab, MajorWorkflow
+from .orchestrators.bohr_orchestrator import run_minilab
 
 # Security
 from .security import PathGuard
@@ -61,6 +65,11 @@ from .agents.registry import create_agents
 __all__ = [
     # Version
     "__version__",
+    # Core
+    "TokenAccount",
+    "get_token_account",
+    "ProjectWriter",
+    "BudgetExceededError",
     # Main entry point
     "run_minilab",
     "BohrOrchestrator",

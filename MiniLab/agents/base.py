@@ -167,6 +167,7 @@ class Agent:
         tools: dict[str, Tool],
         context_manager: ContextManager,
         max_iterations: int = 50,
+        transcript_logger: Any = None,  # TranscriptLogger, optional
     ):
         """
         Initialize agent.
@@ -180,6 +181,7 @@ class Agent:
             tools: Dict of tool name to Tool instance
             context_manager: Context manager for RAG
             max_iterations: Max ReAct iterations
+            transcript_logger: Optional transcript logger for session logging
         """
         self.agent_id = agent_id
         self.name = name
@@ -189,6 +191,11 @@ class Agent:
         self.tools = tools
         self.context_manager = context_manager
         self.max_iterations = max_iterations
+        self.transcript = transcript_logger
+        
+        # Set agent_id on LLM backend for token tracking
+        if hasattr(self.llm, 'agent_id'):
+            self.llm.agent_id = agent_id
         
         # Colleagues (set by registry)
         self.colleagues: dict[str, Agent] = {}
@@ -201,6 +208,10 @@ class Agent:
         # Callbacks
         self.on_message: Optional[Callable[[str, str], None]] = None  # (agent_id, message)
         self.on_tool_call: Optional[Callable[[str, str, dict], None]] = None  # (tool, action, params)
+    
+    def set_transcript(self, transcript_logger: Any) -> None:
+        """Set the transcript logger for this agent."""
+        self.transcript = transcript_logger
     
     def set_colleagues(self, colleagues: dict[str, Agent]) -> None:
         """Set colleague references."""
@@ -302,6 +313,23 @@ class Agent:
                     tool_calls=len(state.tool_calls),
                     colleague_calls=len(state.colleague_calls),
                 )
+            
+            # Check budget before each LLM call
+            try:
+                from ..core import get_token_account, BudgetExceededError
+                account = get_token_account()
+                if account.is_budget_exceeded():
+                    state.status = AgentStatus.COMPLETED
+                    state.completed_at = datetime.now()
+                    return AgentResponse(
+                        status=AgentStatus.COMPLETED,
+                        result="Budget limit reached - wrapping up with current progress",
+                        iterations=state.iteration,
+                        tool_calls=len(state.tool_calls),
+                        colleague_calls=len(state.colleague_calls),
+                    )
+            except ImportError:
+                pass  # Budget checking not available
             
             state.iteration += 1
             
@@ -477,8 +505,19 @@ class Agent:
                 "success": result.success,
                 "timestamp": datetime.now().isoformat(),
             })
-            
-            # Format result
+                        # Log to transcript
+            if self.transcript:
+                result_summary = result.data[:100] if result.data else ""
+                self.transcript.log_tool_use(
+                    agent_name=self.agent_id,
+                    tool_name=tool_name,
+                    action=action,
+                    params=params,
+                    success=result.success,
+                    result_summary=result_summary,
+                    error=result.error if not result.success else None,
+                )
+                        # Format result
             if result.success:
                 if result.data:
                     return f"Success: {result.data}\n{json.dumps(result.model_dump(exclude={'success', 'error', 'data'}), indent=2)}"
@@ -517,6 +556,14 @@ class Agent:
         from ..utils import console
         console.agent_handoff(self.agent_id, colleague_id, f"Consulting on: {question[:60]}..." if len(question) > 60 else f"Consulting on: {question}")
         
+        # Log consultation start to transcript
+        if self.transcript:
+            self.transcript.log_consultation_start(
+                from_agent=self.agent_id,
+                to_agent=colleague_id,
+                question=question,
+            )
+        
         # Record colleague call
         state.colleague_calls.append({
             "colleague": colleague_id,
@@ -536,6 +583,15 @@ class Agent:
                 result = response.result or "Colleague completed without explicit result"
                 # Show brief summary of consultation result
                 console.agent_response(colleague_id, result[:80] + "..." if len(result) > 80 else result)
+                
+                # Log consultation response to transcript
+                if self.transcript:
+                    self.transcript.log_consultation_response(
+                        from_agent=self.agent_id,
+                        to_agent=colleague_id,
+                        response=result,
+                    )
+                
                 return result
             else:
                 return f"Colleague response (status={response.status.value}): {response.error or response.result}"

@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from pathlib import Path
 import csv
-import re
 import json
+import re
 
 from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
 from ..utils import console
@@ -141,7 +141,7 @@ Request: {user_request[:500]}""",
 {f"## Statistical Guidance (from Bayes):{chr(10)}{stats_advice}" if stats_advice else ""}
 
 ## Your Task:
-As an expert orchestrator, propose the OPTIMAL analysis plan for this request. Be advisory and decisive - recommend what YOU think is best, don't just ask what they want.
+As an expert orchestrator, propose the OPTIMAL analysis plan for this request. Be advisory and decisive - recommend what YOU think is best.
 
 ### Format your response as:
 
@@ -151,22 +151,27 @@ As an expert orchestrator, propose the OPTIMAL analysis plan for this request. B
 ### Recommended Approach
 [Your expert recommendation for how to tackle this - be specific about methods, scope, and deliverables. This is what you ADVISE, not options to choose from.]
 
-### Key Questions (2-3 only)
-Ask ONLY critical questions that affect the analysis direction:
-1. **Token Budget** - "What's your token budget for this session?" followed by the options below
-2. **Primary Endpoint** - If multiple outcomes exist, which should be the focus?
-3. [One domain-specific question if truly needed]
+### Recommended Budget
+Based on the complexity of this request, suggest an appropriate token budget:
+- Assess request complexity (narrow vs broad scope, data complexity, literature needs)
+- Recommend ONE specific budget with reasoning
+- Present alternatives ONLY if the user might want different scope
 
-For the token budget question, present these options:
-- **Quick (~100K tokens, ~$0.50)**: Fast exploration, minimal literature review, 1-2 key outputs
-- **Thorough (~500K tokens, ~$2.50)**: Full analysis with literature review, figures, and comprehensive summary
-- **Comprehensive (~1M tokens, ~$5.00)**: Deep dive with extensive literature review, multiple analyses, detailed documentation
-- **Custom**: Let them specify their own token limit
+Example: "For this project, I recommend ~300K tokens (~$1.50). This allows for a focused literature review, thorough analysis, and complete writeup. If you want just a quick exploration, 100K would suffice."
+
+### Key Questions (1-2 max, or none)
+Ask ONLY if there's genuine ambiguity that YOU cannot resolve:
+- **Primary Endpoint** - If multiple outcomes exist and it's unclear which matters
+- One domain-specific question ONLY if truly essential
 
 DO NOT ask about:
+- Token budget (you recommend it)
 - Timelines (we execute immediately)
-- Whether they want figures (assume yes, we're scientists)
-- Obvious scope questions (use your judgment)""",
+- Whether they want figures (assume yes)
+- Obvious scope questions (use your judgment)
+- Anything you can reasonably infer or decide yourself
+
+If the user said things like "use your best judgment" or "proceed autonomously", make ALL decisions yourself without questions.""",
                     context=f"Project: {self.project_path.name}"
                 )
                 
@@ -191,8 +196,11 @@ DO NOT ask about:
                 if was_spinning:
                     Spinner.resume_after_input()
                 
-                # Parse token budget from response if mentioned
-                self._state["token_budget"] = self._parse_token_budget(user_response)
+                # Parse token budget from response (or from Bohr's recommendation if user didn't specify)
+                self._state["token_budget"] = self._parse_token_budget(
+                    user_response, 
+                    bohr_analysis=self._state.get("analysis", "")
+                )
                 self._state["clarifications"] = user_response
                 self._current_step = 4
                 self.save_checkpoint()
@@ -251,6 +259,9 @@ Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, exp
                     "recommended_workflow": recommended,
                     "data_manifest": self._state["data_manifest"],
                     "token_budget": self._state.get("token_budget"),
+                    # Pass user's natural language preferences as context for downstream agents
+                    # This enables fluid, contextual autonomy - not hardcoded levels
+                    "user_preferences": self._state.get("clarifications", ""),
                 },
                 artifacts=[str(self.project_path / "project_specification.md")],
                 summary=f"Consultation complete. Recommended: {recommended}",
@@ -318,40 +329,71 @@ Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, exp
                 lines.append(f"  Columns: {cols}")
         return "\n".join(lines)
     
-    def _parse_token_budget(self, user_response: str) -> Optional[int]:
+    def _parse_token_budget(self, user_response: str, bohr_analysis: str = "") -> Optional[int]:
         """
-        Parse token budget from user response.
+        Parse token budget from user response OR Bohr's recommendation.
         
-        Looks for keywords like 'quick', 'thorough', 'comprehensive' or explicit numbers.
-        Returns token count or None if not specified.
+        Priority:
+        1. User's explicit budget specification
+        2. User's keyword (quick, thorough, comprehensive)
+        3. Bohr's recommended budget from analysis
+        4. Default based on implied scope
+        
+        Handles common typos like 'l' for 'k' (e.g., "200l" → "200k").
         """
         response_lower = user_response.lower()
         
-        # Check for explicit size keywords (new tiers)
-        if any(word in response_lower for word in ['quick', 'fast', 'minimal', '100k']):
+        # Fix common typos: l→k (adjacent on keyboard)
+        response_fixed = re.sub(r'(\d+)[lL]\b', r'\1k', response_lower)
+        
+        # Check for explicit size keywords from user
+        if any(word in response_fixed for word in ['quick', 'fast', 'minimal', '100k']):
             return 100_000
-        if any(word in response_lower for word in ['thorough', 'standard', '500k']):
+        if any(word in response_fixed for word in ['thorough', 'standard', '500k']):
             return 500_000
-        if any(word in response_lower for word in ['comprehensive', 'full', 'deep', '1m', '1000k']):
+        if any(word in response_fixed for word in ['comprehensive', 'full', 'deep', '1m', '1000k']):
             return 1_000_000
         
-        # Check for explicit numbers (e.g., "200000 tokens" or "200k" or "200K tokens")
-        # Handle formats like: 200k, 200K, 200000, 200,000
-        number_match = re.search(r'(\d+(?:,\d+)*)[kK]?\s*(?:tokens?)?', response_lower)
+        # Check for explicit numbers from user (e.g., "200000 tokens" or "200k" or "200K tokens")
+        number_match = re.search(r'(\d+(?:,\d+)*)\s*[kK]?\s*(?:tokens?)?', response_fixed)
         if number_match:
             num_str = number_match.group(1).replace(',', '')
             num = int(num_str)
-            # Check if followed by k/K in the original response
-            match_end = number_match.end()
-            if match_end < len(response_lower) and response_lower[match_end-1:match_end+1].lower() in ['k ', 'k\n', 'k.', 'k,']:
+            if 'k' in number_match.group(0).lower():
                 num *= 1000
-            elif 'k' in number_match.group(0).lower():
-                num *= 1000
-            if num >= 50_000:  # Reasonable minimum
+            if num >= 50_000:
                 return num
+            elif num > 0 and num < 50_000:
+                console.warning(f"Budget '{num}' seems low. Interpreting as {num}k = {num * 1000:,} tokens.")
+                return num * 1000
         
-        # Default to thorough if not specified
-        return 500_000
+        # If user didn't specify, try to extract Bohr's recommendation
+        if bohr_analysis:
+            bohr_lower = bohr_analysis.lower()
+            # Look for Bohr's specific recommendation (e.g., "~300K", "recommend 500k")
+            bohr_match = re.search(r'recommend[^\d]*(\d+)\s*[kK]', bohr_lower)
+            if bohr_match:
+                bohr_budget = int(bohr_match.group(1)) * 1000
+                console.info(f"Using Bohr's recommended budget: {bohr_budget:,} tokens")
+                return bohr_budget
+            
+            # Look for any specific K value in recommendation section
+            bohr_match = re.search(r'~?(\d+)\s*[kK]\s*tokens?', bohr_lower)
+            if bohr_match:
+                bohr_budget = int(bohr_match.group(1)) * 1000
+                if bohr_budget >= 50_000:
+                    console.info(f"Using Bohr's suggested budget: {bohr_budget:,} tokens")
+                    return bohr_budget
+        
+        # Default based on user's autonomy signals
+        if any(word in response_lower for word in ['best judgment', 'autonomous', 'your discretion', 'proceed']):
+            # User wants us to decide - use moderate budget
+            console.info("User trusts our judgment. Using standard budget: 300K tokens.")
+            return 300_000
+        
+        # Final default
+        console.info("No budget specified. Using standard budget: 300K tokens.")
+        return 300_000
     
     def _extract_workflow_json(self, spec: str) -> str:
         """
@@ -385,9 +427,15 @@ Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, exp
     def _write_outputs(self) -> None:
         """Write consultation outputs."""
         self.project_path.mkdir(parents=True, exist_ok=True)
+        
+        # Write project specification
         with open(self.project_path / "project_specification.md", "w") as f:
             f.write("# Project Specification\n\n")
             f.write(self._state.get("project_spec", ""))
-        with open(self.project_path / "data_manifest.md", "w") as f:
-            f.write("# Data Manifest\n\n")
-            f.write(self._format_manifest(self._state.get("data_manifest", {})))
+        
+        # Only write data manifest if there are actual data files
+        data_manifest = self._state.get("data_manifest", {})
+        if data_manifest.get("files"):
+            with open(self.project_path / "data_manifest.md", "w") as f:
+                f.write("# Data Manifest\n\n")
+                f.write(self._format_manifest(data_manifest))

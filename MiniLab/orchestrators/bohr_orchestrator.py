@@ -27,6 +27,7 @@ from ..agents import AgentRegistry, Agent
 from ..agents.registry import create_agents
 from ..agents.prompts import PromptBuilder
 from ..storage import TranscriptLogger
+from ..core import TokenAccount, get_token_account, ProjectWriter
 from ..workflows import (
     WorkflowModule,
     WorkflowResult,
@@ -41,13 +42,16 @@ from ..workflows import (
 from ..llm_backends import AnthropicBackend
 
 
-class MajorWorkflow(Enum):
-    """Major workflow types that users can request."""
-    BRAINSTORMING = "brainstorming"
-    LITERATURE_REVIEW = "literature_review"
-    START_PROJECT = "start_project"
-    WORK_ON_EXISTING = "work_on_existing"
-    EXPLORE_DATASET = "explore_dataset"
+# Workflow types are now GUIDELINES, not fixed sequences.
+# Bohr dynamically decides which workflows to run and in what order.
+WORKFLOW_TYPES = {
+    "consultation": "Understanding user needs, gathering requirements, setting scope",
+    "literature_review": "Background research, citations, context gathering",
+    "planning_committee": "Multi-agent deliberation on approach and methodology",
+    "execute_analysis": "Data analysis, code execution, producing results",
+    "writeup_results": "Documenting findings, creating reports and figures",
+    "critical_review": "Quality assurance, validation, error checking",
+}
 
 
 @dataclass
@@ -138,36 +142,34 @@ class BohrOrchestrator:
         "critical_review": CriticalReviewModule,
     }
     
-    # Major workflow -> mini-workflow sequences
-    WORKFLOW_SEQUENCES = {
-        MajorWorkflow.BRAINSTORMING: [
-            "consultation",
-            "planning_committee",
-        ],
-        MajorWorkflow.LITERATURE_REVIEW: [
-            "consultation",
-            "literature_review",
-        ],
-        MajorWorkflow.START_PROJECT: [
-            "consultation",
-            "literature_review",
-            "planning_committee",
-            "execute_analysis",
-            "writeup_results",
-            "critical_review",
-        ],
-        MajorWorkflow.WORK_ON_EXISTING: [
-            "consultation",  # Understand what to continue
-            "planning_committee",  # Plan next steps
-            "execute_analysis",
-            "writeup_results",
-            "critical_review",
-        ],
-        MajorWorkflow.EXPLORE_DATASET: [
-            "consultation",
-            "execute_analysis",  # EDA focus
-            "writeup_results",
-        ],
+    # Workflow GUIDELINES - suggestions for Bohr, not rigid sequences
+    # Bohr decides dynamically based on project needs and budget
+    WORKFLOW_GUIDELINES = {
+        "brainstorming": {
+            "typical_phases": ["consultation", "planning_committee"],
+            "description": "Open-ended exploration and idea generation",
+            "usually_skip": ["execute_analysis", "writeup_results"],
+        },
+        "literature_review": {
+            "typical_phases": ["consultation", "literature_review"],
+            "description": "Background research and citation gathering",
+            "usually_skip": ["execute_analysis"],
+        },
+        "full_analysis": {
+            "typical_phases": ["consultation", "literature_review", "planning_committee", "execute_analysis", "writeup_results", "critical_review"],
+            "description": "Complete research pipeline from start to finish",
+            "usually_skip": [],
+        },
+        "data_exploration": {
+            "typical_phases": ["consultation", "execute_analysis", "writeup_results"],
+            "description": "Exploratory data analysis focus",
+            "usually_skip": ["literature_review", "planning_committee"],
+        },
+        "continuation": {
+            "typical_phases": ["consultation", "planning_committee", "execute_analysis", "writeup_results", "critical_review"],
+            "description": "Continue work on an existing project",
+            "usually_skip": [],
+        },
     }
     
     def __init__(
@@ -184,22 +186,44 @@ class BohrOrchestrator:
             user_callback: Function to get user input (for non-interactive)
             transcripts_dir: Directory for saving transcripts
         """
-        self.llm_backend = llm_backend or AnthropicBackend(model="claude-sonnet-4-5")
+        self.llm_backend = llm_backend or AnthropicBackend(model="claude-sonnet-4-5", agent_id="bohr")
         self.user_callback = user_callback or self._default_user_input
         
         # Set up transcript logger
         self.transcripts_dir = transcripts_dir or Path(__file__).parent.parent.parent / "Transcripts"
         self.transcript = TranscriptLogger(self.transcripts_dir)
         
+        # Initialize TokenAccount singleton
+        self.token_account = get_token_account()
+        
+        # Set up warning callback for token budget
+        self.token_account.set_warning_callback(self._on_budget_warning)
+        
         self.context_manager: Optional[ContextManager] = None
         self.tool_factory = None  # Set during session start
         self.agents: dict[str, Agent] = {}
         self.session: Optional[MiniLabSession] = None
+        self._session_date: Optional[datetime] = None
         
         self._interrupt_requested = False
         self._exit_requested = False
         self._token_budget: Optional[int] = None
         self._tokens_used: int = 0
+    
+    def _on_budget_warning(self, used: int, budget: int, percentage: float) -> None:
+        """Callback when token budget warnings are triggered."""
+        from ..utils import console
+        
+        if percentage >= 95:
+            console.warning(f"⚠ Token budget critical: {percentage:.0f}% used ({used:,}/{budget:,})")
+            console.agent_message("BOHR", "We're nearly at our budget limit. I'll wrap up the current task.")
+        elif percentage >= 80:
+            console.warning(f"Token budget at {percentage:.0f}% ({used:,}/{budget:,})")
+        elif percentage >= 60:
+            console.info(f"Budget update: {percentage:.0f}% used ({used:,}/{budget:,})")
+        
+        # Log to transcript
+        self.transcript.log_budget_warning(percentage, f"Budget at {percentage:.0f}% ({used:,}/{budget:,})")
     
     def _default_user_input(self, prompt: str) -> str:
         """Default user input via stdin."""
@@ -239,12 +263,18 @@ class BohrOrchestrator:
         """
         from ..utils import console
         
+        # Set session date (used throughout for consistent timestamps)
+        self._session_date = datetime.now()
+        
+        # Reset TokenAccount for new session
+        self.token_account.reset()
+        
         # Have Bohr generate and confirm project name
         if not project_name:
             project_name = await self._generate_project_name_interactive(user_request)
         
         # Create project directory
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_id = self._session_date.strftime("%Y%m%d_%H%M%S")
         project_path = self.SANDBOX_ROOT / project_name
         project_path.mkdir(parents=True, exist_ok=True)
         
@@ -267,7 +297,12 @@ class BohrOrchestrator:
             workspace_root=workspace_root,
             input_callback=self._user_input_callback,
             permission_callback=None,
+            session_date=self._session_date,  # Pass session date to agents
         )
+        
+        # Set transcript logger on all agents
+        for agent in self.agents.values():
+            agent.set_transcript(self.transcript)
         
         # Save initial session state (log internally, no console spam)
         self._log(f"Session started: {session_id}", console_print=False)
@@ -296,29 +331,32 @@ class BohrOrchestrator:
         # Reinitialize agents with context manager and tool factory
         # workspace_root should be the parent of Sandbox, not the project path
         workspace_root = self.SANDBOX_ROOT.parent
+        
+        # Use session start time for date injection, or current time if not available
+        session_date = datetime.fromisoformat(self.session.start_time) if self.session.start_time else datetime.now()
+        
         self.agents, self.context_manager, self.tool_factory = create_agents(
             workspace_root=workspace_root,
             input_callback=self._user_input_callback,
             permission_callback=None,
+            session_date=session_date,
         )
+        
+        # Set transcript logger on resumed agents
+        for agent in self.agents.values():
+            agent.set_transcript(self.transcript)
         
         self._log(f"Session resumed: {self.session.session_id}")
         
         return self.session
     
-    async def run(
-        self,
-        major_workflow: Optional[MajorWorkflow] = None,
-    ) -> dict[str, Any]:
+    async def run(self) -> dict[str, Any]:
         """
-        Run the orchestration loop.
+        Run the orchestration loop with AGENT-DRIVEN workflow planning.
         
-        If major_workflow is not specified, Bohr will determine
-        the appropriate workflow based on user interaction.
+        Bohr dynamically decides which workflows to run and in what order,
+        based on project needs, budget, and progress. No fixed sequences.
         
-        Args:
-            major_workflow: Optional explicit workflow to run
-            
         Returns:
             Final results dictionary
         """
@@ -328,120 +366,146 @@ class BohrOrchestrator:
             raise RuntimeError("No active session. Call start_session first.")
         
         try:
-            # Determine workflow if not specified
-            if not major_workflow:
-                spinner = Spinner("Analyzing request...")
-                spinner.start()
-                major_workflow = await self._determine_workflow()
-                spinner.stop(f"Selected workflow: {major_workflow.value}")
+            # Always start with consultation to understand user needs
+            # Consultation is the ONE mandatory phase - everything else is dynamic
+            console.agent_message("BOHR", "Let's start by understanding exactly what you need. I'll then decide the best approach based on your goals and budget.")
             
-            self._log(f"Selected workflow: {major_workflow.value}", console_print=False)
-            
-            # Get workflow sequence
-            workflow_sequence = self.WORKFLOW_SEQUENCES[major_workflow]
-            
-            # Narrative-style introduction instead of system message
-            workflow_intros = {
-                MajorWorkflow.START_PROJECT: "Sounds like we're starting a new project! I'll guide us through the full research pipeline - from understanding your goals through analysis and writeup.",
-                MajorWorkflow.LITERATURE_REVIEW: "I'll help you explore the literature on this topic. Let's see what's out there and build a solid foundation.",
-                MajorWorkflow.BRAINSTORMING: "Let's brainstorm together! I'll help you think through the possibilities and form a concrete plan.",
-                MajorWorkflow.EXPLORE_DATASET: "Let's dive into your data and see what stories it has to tell. I love a good exploration!",
-                MajorWorkflow.WORK_ON_EXISTING: "Picking up where we left off - let me review what we've done and figure out the best next steps.",
-            }
-            intro = workflow_intros.get(major_workflow, f"Let's work through this together.")
-            console.agent_message("BOHR", intro)
-            
-            # Execute workflow sequence
+            # Step 1: Execute consultation (mandatory)
             results = {}
-            for i, workflow_name in enumerate(workflow_sequence, 1):
+            phase_num = 1
+            
+            spinner = Spinner("Running Consultation")
+            spinner.start()
+            self.transcript.log_stage_transition("consultation", "Starting Consultation Phase")
+            self.session.current_workflow = "consultation"
+            self.session.save()
+            
+            consultation_result = await self._execute_workflow("consultation")
+            results["consultation"] = consultation_result
+            self.session.workflow_results["consultation"] = consultation_result
+            
+            if consultation_result.status == WorkflowStatus.COMPLETED:
+                self.session.completed_workflows.append("consultation")
+                spinner.stop("Consultation completed")
+                
+                # Extract key outputs from consultation
+                if consultation_result.outputs:
+                    self.session.context.update(consultation_result.outputs)
+                    
+                    # Set up budget
+                    if consultation_result.outputs.get("token_budget"):
+                        self._token_budget = consultation_result.outputs["token_budget"]
+                        self.token_account.set_budget(self._token_budget)
+                        self.transcript.set_token_budget(self._token_budget)
+                        self._show_post_consultation_summary(consultation_result)
+                    
+                    # Set up user preferences for contextual autonomy
+                    if consultation_result.outputs.get("user_preferences"):
+                        self.tool_factory.set_user_preferences(consultation_result.outputs["user_preferences"])
+            else:
+                spinner.stop_error(f"Consultation failed: {consultation_result.error}")
+                return results  # Can't continue without consultation
+            
+            self.session.save()
+            
+            # Step 2: Agent-driven planning loop
+            # Bohr decides what to do next based on project state, not fixed sequences
+            completed_phases = ["consultation"]
+            available_workflows = ["literature_review", "planning_committee", "execute_analysis", "writeup_results", "critical_review"]
+            
+            while True:
+                # Check for interrupts
                 if self._interrupt_requested or self._exit_requested:
                     if self._exit_requested:
                         console.info("Exiting as requested")
                         self._log("User requested exit", console_print=False)
                     else:
                         console.warning("Interrupt requested, pausing execution")
-                        self._log("Interrupt requested, pausing execution", console_print=False)
                     break
                 
-                # Check token budget before starting new workflow
+                # Budget check and graceful completion
                 if self._token_budget:
-                    current_usage = self.llm_backend.token_usage.get("total_tokens", 0)
-                    budget_used_pct = (current_usage / self._token_budget) * 100
-                    remaining_workflows = len(workflow_sequence) - i + 1
-                    remaining_budget = self._token_budget - current_usage
-                    budget_per_workflow = remaining_budget / max(1, remaining_workflows)
+                    current_usage = self.token_account.total_used
+                    budget_pct = (current_usage / self._token_budget) * 100
                     
+                    # Hard stop at budget
                     if current_usage >= self._token_budget:
-                        console.warning(f"We've used our token budget ({current_usage:,}/{self._token_budget:,}).")
-                        console.agent_message("BOHR", "I'll wrap up with what we have. Here's a summary of our work so far...")
+                        console.error(f"Budget exceeded ({current_usage:,}/{self._token_budget:,}). Stopping.")
+                        console.agent_message("BOHR", "We've hit our budget limit. Let me save our progress.")
+                        self.transcript.log_budget_warning(100, "Budget exceeded - stopping")
                         break
-                    elif budget_used_pct >= 85:
-                        # Dynamically decide: skip to writeup if we're running low
-                        console.warning(f"Budget at {budget_used_pct:.0f}% - I'll prioritize the most important remaining work.")
-                        remaining = workflow_sequence[i-1:]
-                        if "writeup_results" in remaining and workflow_name not in ["writeup_results", "critical_review"]:
-                            console.agent_message("BOHR", "Given our budget, let me skip ahead to summarizing our findings.")
-                            workflow_name = "writeup_results"
-                    elif budget_used_pct >= 60:
-                        # Inform but continue - allocate remaining budget dynamically
-                        console.info(f"Budget update: {budget_used_pct:.0f}% used ({current_usage:,}/{self._token_budget:,}). ~{budget_per_workflow:,.0f} tokens per remaining phase.")
+                    
+                    # Near budget - let Bohr know to wrap up
+                    if budget_pct >= 85 and "writeup_results" not in completed_phases:
+                        console.warning(f"Budget at {budget_pct:.0f}% - Bohr will prioritize completion")
                 
-                # Show progress with spinner
-                phase_msg = f"Phase {i}/{len(workflow_sequence)}: {workflow_name.replace('_', ' ').title()}"
-                console.info(phase_msg)
-                spinner = Spinner(f"Running {workflow_name.replace('_', ' ').title()}")
-                spinner.start()
-                
-                # Log stage transition to transcript
-                self.transcript.log_stage_transition(
-                    workflow_name,
-                    f"Starting {workflow_name.replace('_', ' ').title()} (Phase {i}/{len(workflow_sequence)})"
+                # Ask Bohr: What should we do next?
+                next_action = await self._bohr_decide_next_action(
+                    completed_phases=completed_phases,
+                    available_workflows=[w for w in available_workflows if w not in completed_phases],
+                    project_context=self.session.context,
+                    budget_remaining=(self._token_budget - self.token_account.total_used) if self._token_budget else None,
                 )
                 
-                self._log(f"Starting workflow: {workflow_name}", console_print=False)
-                self.session.current_workflow = workflow_name
-                self.session.save()
+                if next_action["action"] == "done":
+                    # Bohr has decided we're finished
+                    console.agent_message("BOHR", next_action.get("reasoning", "I believe we've accomplished our goals."))
+                    break
                 
-                result = await self._execute_workflow(workflow_name)
-                results[workflow_name] = result
-                self.session.workflow_results[workflow_name] = result
+                elif next_action["action"] == "run_workflow":
+                    workflow_name = next_action["workflow"]
+                    phase_num += 1
+                    
+                    # Run the chosen workflow
+                    console.info(f"Phase {phase_num}: {workflow_name.replace('_', ' ').title()}")
+                    console.agent_message("BOHR", next_action.get("reasoning", f"Let's proceed with {workflow_name}."))
+                    
+                    spinner = Spinner(f"Running {workflow_name.replace('_', ' ').title()}")
+                    spinner.start()
+                    self.transcript.log_stage_transition(workflow_name, f"Starting {workflow_name.replace('_', ' ').title()}")
+                    self.session.current_workflow = workflow_name
+                    self.session.save()
+                    
+                    result = await self._execute_workflow(workflow_name)
+                    results[workflow_name] = result
+                    self.session.workflow_results[workflow_name] = result
+                    
+                    if result.status == WorkflowStatus.COMPLETED:
+                        self.session.completed_workflows.append(workflow_name)
+                        completed_phases.append(workflow_name)
+                        spinner.stop(f"{workflow_name} completed")
+                        self._log(f"Completed: {workflow_name}", console_print=False)
+                        self.transcript.log_system_event(
+                            "workflow_complete",
+                            f"{workflow_name} completed successfully",
+                            {"summary": result.summary} if result.summary else None
+                        )
+                        
+                        # Update context with outputs
+                        if result.outputs:
+                            self.session.context.update(result.outputs)
+                    
+                    elif result.status == WorkflowStatus.FAILED:
+                        spinner.stop_error(f"{workflow_name} failed: {result.error}")
+                        self._log(f"Failed: {workflow_name} - {result.error}", console_print=False)
+                        self.transcript.log_system_event("workflow_failed", f"{workflow_name} failed", {"error": result.error})
+                        
+                        # Ask Bohr how to handle the failure
+                        proceed = await self._handle_workflow_failure(workflow_name, result)
+                        if not proceed:
+                            break
+                        # Mark as attempted so we don't loop forever
+                        completed_phases.append(f"{workflow_name}_failed")
+                    else:
+                        spinner.stop(f"{workflow_name} finished: {result.status.value}")
+                        completed_phases.append(workflow_name)
+                    
+                    self.session.save()
                 
-                if result.status == WorkflowStatus.COMPLETED:
-                    self.session.completed_workflows.append(workflow_name)
-                    spinner.stop(f"{workflow_name} completed")
-                    self._log(f"Completed: {workflow_name}", console_print=False)
-                    # Log completion to transcript
-                    self.transcript.log_system_event(
-                        "workflow_complete",
-                        f"{workflow_name} completed successfully",
-                        {"summary": result.summary} if result.summary else None
-                    )
-                elif result.status == WorkflowStatus.FAILED:
-                    spinner.stop_error(f"{workflow_name} failed: {result.error}")
-                    self._log(f"Failed: {workflow_name} - {result.error}", console_print=False)
-                    # Log failure to transcript
-                    self.transcript.log_system_event(
-                        "workflow_failed",
-                        f"{workflow_name} failed",
-                        {"error": result.error}
-                    )
-                    # Ask user how to proceed
-                    proceed = await self._handle_workflow_failure(workflow_name, result)
-                    if not proceed:
-                        break
                 else:
-                    spinner.stop(f"{workflow_name} finished with status: {result.status.value}")
-                
-                # Pass outputs to next workflow's context
-                if result.outputs:
-                    self.session.context.update(result.outputs)
-                    # Extract token budget from consultation if present
-                    if workflow_name == "consultation" and result.outputs.get("token_budget"):
-                        self._token_budget = result.outputs["token_budget"]
-                        # Post-consultation summary
-                        self._show_post_consultation_summary(result)
-                
-                self.session.save()
+                    # Unknown action - shouldn't happen, but be safe
+                    console.warning(f"Unknown action from Bohr: {next_action}")
+                    break
             
             # Final summary
             console.info("Generating final summary...")
@@ -464,44 +528,107 @@ class BohrOrchestrator:
             self._log(f"Orchestration error: {str(e)}")
             if self.session:
                 self.session.save()
-            # Try to save transcript even on error
             try:
                 self.transcript.save_transcript()
             except Exception:
                 pass
             raise
     
-    async def _determine_workflow(self) -> MajorWorkflow:
+    async def _bohr_decide_next_action(
+        self,
+        completed_phases: list[str],
+        available_workflows: list[str],
+        project_context: dict[str, Any],
+        budget_remaining: Optional[int],
+    ) -> dict[str, Any]:
         """
-        Use Bohr to determine the appropriate workflow via JSON response.
+        Have Bohr intelligently decide what to do next.
+        
+        This is the core of agent-driven planning - Bohr assesses the project
+        state and decides the optimal next step, not a fixed sequence.
         
         Returns:
-            Selected MajorWorkflow
+            {"action": "run_workflow", "workflow": "name", "reasoning": "why"}
+            or {"action": "done", "reasoning": "why we're finished"}
         """
         import json as json_module
         
-        user_request = self.session.context.get("user_request", "")
+        # Build context summary for Bohr
+        project_spec = project_context.get("project_spec", "Not yet defined")
+        user_request = project_context.get("user_request", "")
+        user_preferences = project_context.get("user_preferences", "")
         
-        # Use LLM to classify with structured JSON response
-        try:
-            messages = [
-                {"role": "system", "content": """You are Bohr, classifying a research request into the appropriate workflow.
+        # Summarize what's been accomplished
+        accomplishments = []
+        if "literature_summary" in project_context:
+            accomplishments.append("- Literature review completed")
+        if "analysis_plan" in project_context:
+            accomplishments.append("- Analysis plan created")
+        if "analysis_results" in project_context:
+            accomplishments.append("- Analysis executed")
+        if "final_report" in project_context:
+            accomplishments.append("- Results written up")
+        if "validation_report" in project_context:
+            accomplishments.append("- Critical review completed")
+        
+        accomplishments_str = "\n".join(accomplishments) if accomplishments else "- Consultation complete, ready to proceed"
+        
+        # Budget awareness
+        budget_info = ""
+        if budget_remaining is not None and self._token_budget:
+            budget_pct = ((self._token_budget - budget_remaining) / self._token_budget) * 100
+            budget_info = f"\nBudget Status: {budget_pct:.0f}% used ({budget_remaining:,} tokens remaining)"
+            if budget_pct >= 85:
+                budget_info += "\n⚠️ BUDGET LOW: Prioritize completion tasks (writeup_results) over new work."
+        
+        messages = [
+            {"role": "system", "content": f"""You are Bohr, deciding the next step for this research project.
+
+Your job is to intelligently orchestrate the project, not follow a rigid sequence.
+Consider: What does this project NEED based on its current state and goals?
+
+AVAILABLE WORKFLOWS (you can run or skip any of these):
+- literature_review: Background research, citations, context gathering
+- planning_committee: Multi-agent deliberation on approach and methodology  
+- execute_analysis: Data analysis, code execution, producing results
+- writeup_results: Documenting findings, creating reports and figures
+- critical_review: Quality assurance, validation, error checking
+
+GUIDELINES for typical projects (not rules - use your judgment):
+- Full analysis: Usually needs literature → planning → execution → writeup → review
+- Literature-only: Just literature_review, skip execution
+- Data exploration: Can skip literature and planning, go straight to analysis
+- Brainstorming: Planning committee focus, may skip analysis
+- Quick projects: May combine or skip steps as appropriate
 
 RESPOND WITH ONLY A JSON OBJECT:
-{"workflow": "WORKFLOW_NAME", "confidence": 0.0-1.0, "reasoning": "brief explanation"}
+{{"action": "run_workflow", "workflow": "workflow_name", "reasoning": "one sentence why"}}
+or
+{{"action": "done", "reasoning": "one sentence why we're finished"}}
 
-Valid WORKFLOW_NAME values:
-- BRAINSTORMING: For exploring ideas, hypothesis generation, open-ended discussion
-- LITERATURE_REVIEW: For researching background, finding citations, understanding field
-- START_PROJECT: For new complete analysis projects with data
-- WORK_ON_EXISTING: For continuing or iterating on an existing project
-- EXPLORE_DATASET: For data exploration, EDA, understanding what's in data"""},
-                {"role": "user", "content": f"Classify this request:\n\n{user_request}"}
-            ]
-            
+Consider the user's preferences when deciding - if they want thorough work, don't skip steps.
+If they want it quick, skip less critical phases."""},
+            {"role": "user", "content": f"""PROJECT STATE:
+
+Original Request: {user_request}
+
+User Preferences: {user_preferences if user_preferences else "No specific preferences"}
+
+Completed Phases: {', '.join(completed_phases)}
+
+Current Accomplishments:
+{accomplishments_str}
+
+Available Workflows (not yet run): {', '.join(available_workflows) if available_workflows else 'All complete'}
+{budget_info}
+
+What should we do next?"""}
+        ]
+        
+        try:
             response = await self.llm_backend.acomplete(messages)
             
-            # Parse JSON response
+            # Parse JSON
             response = response.strip()
             if response.startswith("```"):
                 response = response.split("```")[1]
@@ -510,22 +637,76 @@ Valid WORKFLOW_NAME values:
                 response = response.strip()
             
             data = json_module.loads(response)
-            workflow_str = data.get("workflow", "START_PROJECT").upper()
             
-            # Map to enum
-            workflow_map = {
-                "BRAINSTORMING": MajorWorkflow.BRAINSTORMING,
-                "LITERATURE_REVIEW": MajorWorkflow.LITERATURE_REVIEW,
-                "START_PROJECT": MajorWorkflow.START_PROJECT,
-                "WORK_ON_EXISTING": MajorWorkflow.WORK_ON_EXISTING,
-                "EXPLORE_DATASET": MajorWorkflow.EXPLORE_DATASET,
-            }
+            # Validate response
+            if data.get("action") == "run_workflow":
+                workflow = data.get("workflow", "")
+                if workflow in available_workflows:
+                    return data
+                else:
+                    # Invalid workflow - default to done if nothing available
+                    if not available_workflows:
+                        return {"action": "done", "reasoning": "All available workflows completed."}
+                    # Pick first available
+                    return {"action": "run_workflow", "workflow": available_workflows[0], "reasoning": f"Proceeding with {available_workflows[0]}"}
             
-            return workflow_map.get(workflow_str, MajorWorkflow.START_PROJECT)
+            return data  # Return done or whatever was decided
+            
+        except Exception as e:
+            # On error, make a sensible default decision
+            if not available_workflows:
+                return {"action": "done", "reasoning": "All phases complete."}
+            
+            # If we haven't done writeup and have results, do writeup
+            if "writeup_results" in available_workflows and "analysis_results" in project_context:
+                return {"action": "run_workflow", "workflow": "writeup_results", "reasoning": "Writing up analysis results."}
+            
+            # Otherwise, do the first available
+            return {"action": "run_workflow", "workflow": available_workflows[0], "reasoning": f"Proceeding with {available_workflows[0]}."}
+    
+    async def _determine_workflow_type(self) -> str:
+        """
+        Legacy method - Use Bohr to classify the overall project type.
+        
+        Note: This is now only used for initial classification hints.
+        Actual workflow sequencing is handled by _bohr_decide_next_action.
+        
+        Returns:
+            Workflow type string (for informational purposes)
+        """
+        import json as json_module
+        
+        user_request = self.session.context.get("user_request", "")
+        
+        try:
+            messages = [
+                {"role": "system", "content": """Classify this research request briefly.
+
+RESPOND WITH ONLY A JSON OBJECT:
+{"type": "TYPE_NAME", "reasoning": "brief explanation"}
+
+Valid TYPE_NAME values:
+- brainstorming: Exploring ideas, hypothesis generation
+- literature_review: Background research, citations
+- full_analysis: Complete project with data analysis
+- data_exploration: EDA, understanding data
+- continuation: Continuing existing work"""},
+                {"role": "user", "content": f"Classify: {user_request}"}
+            ]
+            
+            response = await self.llm_backend.acomplete(messages)
+            response = response.strip()
+            if response.startswith("```"):
+                response = response.split("```")[1]
+                if response.startswith("json"):
+                    response = response[4:]
+                response = response.strip()
+            
+            data = json_module.loads(response)
+            return data.get("type", "full_analysis")
                     
         except Exception:
-            # Fall back to START_PROJECT on any error
-            return MajorWorkflow.START_PROJECT
+            return "full_analysis"
     
     async def _execute_workflow(self, workflow_name: str) -> WorkflowResult:
         """
@@ -605,6 +786,11 @@ Valid WORKFLOW_NAME values:
             inputs["validation_report"] = context["validation_report"]
         if "final_report" in context:
             inputs["final_report"] = context["final_report"]
+        
+        # Pass user preferences for contextual autonomy (natural language, not levels)
+        # This enables agents to understand user's communication style preferences
+        if "user_preferences" in context:
+            inputs["user_preferences"] = context["user_preferences"]
         
         # Data paths - scan ReadData
         data_paths = self._scan_data_paths()
@@ -761,13 +947,31 @@ This summary will be presented to the user.""",
         
         summary = summary_result.get("response", self._simple_summary())
         
-        # Save summary to file
-        summary_path = self.session.project_path / "session_summary.md"
-        with open(summary_path, "w") as f:
-            f.write(f"# Session Summary: {self.session.project_name}\n\n")
-            f.write(f"Session ID: {self.session.session_id}\n")
-            f.write(f"Started: {self.session.started_at}\n\n")
-            f.write(summary)
+        # Get token usage for the summary
+        token_usage = {}
+        if hasattr(self.llm_backend, 'token_usage'):
+            usage = self.llm_backend.token_usage
+            token_usage = {
+                "total_used": usage.get("total_tokens", 0),
+                "budget": self._token_budget,
+                "percentage_used": (usage.get("total_tokens", 0) / self._token_budget * 100) if self._token_budget else 0,
+                "estimated_cost": (usage.get("total_tokens", 0) / 1_000_000) * 5.00,
+            }
+        
+        # Use ProjectWriter for consistent output (single session_summary.md)
+        from ..core import ProjectWriter
+        writer = ProjectWriter(
+            project_path=self.session.project_path,
+            project_name=self.session.project_name,
+        )
+        
+        writer.write_session_summary(
+            summary=summary,
+            session_id=self.session.session_id,
+            started_at=self.session.started_at,
+            completed_workflows=self.session.completed_workflows,
+            token_usage=token_usage,
+        )
         
         return summary
     
@@ -1011,14 +1215,17 @@ async def run_minilab(
             print()
             timing().print_report()
         
-        # Print token usage summary
-        if hasattr(orchestrator.llm_backend, 'token_usage'):
-            usage = orchestrator.llm_backend.token_usage
-            if usage.get("total_tokens", 0) > 0:
-                print()
-                console.info(f"📊 Token Usage: {usage['input_tokens']:,} in + {usage['output_tokens']:,} out = {usage['total_tokens']:,} total")
-                if usage.get("cache_read_tokens", 0) > 0:
-                    console.info(f"   Cache: {usage['cache_read_tokens']:,} read, {usage.get('cache_creation_tokens', 0):,} created")
+        # Print token usage summary from TokenAccount (authoritative source)
+        usage = orchestrator.token_account.usage_summary
+        if usage.get("total_used", 0) > 0:
+            print()
+            console.info(f"📊 Token Usage: {usage['total_input']:,} in + {usage['total_output']:,} out = {usage['total_used']:,} total")
+            if usage.get("budget"):
+                pct = usage.get("percentage_used", 0)
+                console.info(f"   Budget: {usage['total_used']:,} / {usage['budget']:,} ({pct:.1f}% used)")
+            console.info(f"   Estimated Cost: ${usage.get('estimated_cost', 0):.2f}")
+            if usage.get("cache_read", 0) > 0:
+                console.info(f"   Cache: {usage['cache_read']:,} read, {usage.get('cache_creation', 0):,} created")
         
         return results
     except KeyboardInterrupt:

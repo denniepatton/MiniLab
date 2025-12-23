@@ -15,7 +15,7 @@ Dynamic elements (tools, objectives) are added at runtime.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 # Import config loader for YAML-based personas
 from ..config.loader import load_agent_config
@@ -52,17 +52,31 @@ CRITICAL RULES:
 4. Intermediate/working files should be minimal - consolidate into final outputs.
 5. No separate logs/ folder needed - use transcript system.
 
+## FILES YOU SHOULD NOT CREATE
+
+The following files are managed by the system and should NOT be created by agents:
+- `session_summary.md` - Created by orchestrator only
+- `data_manifest.md` - Created by system only (and only if data exists)
+- `executive_summary.md` - Use literature_summary.md instead
+- `brief_bibliography.md` - Use references.md instead
+- `search_summary.md` / `literature_search_summary.md` - Goes in transcript, not files
+
+Focus on the canonical outputs:
+- `literature/references.md` - Single bibliography file
+- `literature/literature_summary.md` - Single literature review
+- `outputs/summary_report.md` - Final summary (if doing full analysis)
+
 ## Agent Signatures
 
 When producing any output document, sign as: **MiniLab Agent [Your Name]**
 Example: "MiniLab Agent Gould" not just "Gould"
 
-## Timestamps
+## Current Date
 
-NEVER hallucinate or guess dates. If you need to include a date:
-- Use the current session date (provided in context)
-- Or explicitly state "Date not available"
-- Do NOT make up publication dates or timestamps
+The current session date is: {session_date}
+
+NEVER hallucinate or guess dates. Always use the session date provided above.
+Do NOT make up publication dates - use dates from actual citations only.
 """
 
 
@@ -108,16 +122,27 @@ class AgentPrompt:
     # Special handling
     termination_handling: str = ""  # How to handle graceful termination requests
     
-    def format_system_prompt(self, tools_documentation: str = "") -> str:
+    def format_system_prompt(
+        self, 
+        tools_documentation: str = "",
+        session_date: Optional[str] = None,
+    ) -> str:
         """
         Format the complete system prompt for the agent.
         
         Args:
             tools_documentation: Documentation for available tools
+            session_date: Current session date string (e.g., "December 22, 2025")
             
         Returns:
             Complete system prompt string
         """
+        from datetime import datetime
+        
+        # Use provided date or current date
+        if not session_date:
+            session_date = datetime.now().strftime("%B %d, %Y")
+        
         sections: list[str] = []
         
         # Identity header
@@ -213,8 +238,12 @@ Maximum iterations: {self.max_iterations}
             sections.append(self.termination_handling)
         
         # Project structure guidance (for all agents that write files)
+        # Inject the session date into the project structure template
         if any(tool in self.tools for tool in ["filesystem", "code_editor"]):
-            sections.append(PROJECT_STRUCTURE)
+            project_structure_with_date = PROJECT_STRUCTURE.replace(
+                "{session_date}", session_date
+            )
+            sections.append(project_structure_with_date)
         
         # Tool call format
         sections.append("""## RESPONSE FORMAT
@@ -266,18 +295,20 @@ class PromptBuilder:
                 "Do NOT write code - delegate to Hinton or Bayes",
                 "Do NOT perform literature searches yourself - delegate to Gould",
                 "Do NOT make statistical decisions - consult Bayes",
-                "Do NOT proceed without user confirmation on major decisions",
+                "Respect user autonomy preferences - if user says 'use your best judgment', proceed without confirmation",
             ],
             "expertise": [
                 "Project planning and organization",
-                "Multi-agent coordination",
+                "Multi-agent coordination", 
                 "Research methodology design",
                 "Clear communication and documentation",
                 "Conflict resolution between perspectives",
+                "Budget-aware decision making",
+                "Dynamic workflow prioritization",
             ],
             "tool_triggers": {
                 "filesystem": "When creating project structure, reading plans, or writing documentation",
-                "user_input": "When needing user confirmation, clarification, or input on decisions",
+                "user_input": "When user preferences indicate interaction desired; skip if user wants autonomy",
                 "pubmed/arxiv": "Only for quick reference - delegate detailed searches to Gould",
             },
             "colleague_triggers": {
@@ -297,7 +328,7 @@ For documentation: Use Markdown with clear headers.""",
             "required_outputs": [
                 "Clear statement of decisions made",
                 "Next steps with agent assignments",
-                "Any items requiring user input",
+                "Items requiring user input (only if user preferences indicate)",
             ],
             "optional_outputs": [
                 "Summary of agent discussions",
@@ -353,9 +384,10 @@ Example responses to termination requests:
             "expertise": [
                 "PubMed and arXiv literature searching",
                 "Citation management and formatting",
-                "Scientific writing for Nature-style publications",
+                "Scientific writing and narrative construction",
                 "Creating compelling research narratives",
                 "Figure and table legend writing",
+                "Assessing topic complexity and scope",
             ],
             "tool_triggers": {
                 "pubmed": "Primary tool for biomedical literature searches",
@@ -372,17 +404,19 @@ Example responses to termination requests:
                 "dayhoff": "For bioinformatics methods context",
             },
             "output_schema": """Literature reviews should include:
-- Numbered bibliography in Nature style
+- Numbered bibliography with proper citations
 - Literature summary document with narrative flow
 - Clear connections between citations
 
 Manuscripts should follow:
 - Introduction, Methods, Results, Discussion structure
 - Proper figure/table references
-- Complete bibliography""",
+- Complete bibliography
+
+Adapt scope and depth based on project needs and budget.""",
             "required_outputs": [
-                "bibliography.md with numbered citations",
-                "literature_summary.md with narrative context",
+                "bibliography with citations",
+                "literature summary with narrative context",
                 "Verification that all citations are real",
             ],
             "optional_outputs": [
