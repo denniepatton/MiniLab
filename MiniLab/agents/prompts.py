@@ -126,6 +126,7 @@ class AgentPrompt:
         self, 
         tools_documentation: str = "",
         session_date: Optional[str] = None,
+        budget_context: Optional[str] = None,
     ) -> str:
         """
         Format the complete system prompt for the agent.
@@ -133,6 +134,7 @@ class AgentPrompt:
         Args:
             tools_documentation: Documentation for available tools
             session_date: Current session date string (e.g., "December 22, 2025")
+            budget_context: Optional budget status string to inject (e.g., "60% of budget used")
             
         Returns:
             Complete system prompt string
@@ -231,6 +233,19 @@ class AgentPrompt:
 {self.communication_style}
 """)
         
+        # Budget context (if provided) - helps agents calibrate response depth
+        if budget_context:
+            sections.append(f"""## BUDGET AWARENESS
+
+{budget_context}
+
+Use this information to calibrate your work:
+- **<50% used**: Full depth available, but remain efficient
+- **50-75% used**: Prioritize core deliverables, skip nice-to-haves
+- **>75% used**: Focus on completing essential work, be concise
+- **>90% used**: Wrap up current task, provide actionable summary
+""")
+        
         # Add flexibility guidance - agents have autonomy
         sections.append("""## AUTONOMY AND FLEXIBILITY
 
@@ -281,8 +296,18 @@ To use a tool, output a JSON block:
 
 To consult a colleague, output:
 ```colleague
-{"colleague": "agent_id", "question": "Your question here"}
+{"colleague": "agent_id", "question": "Your question here", "mode": "focused"}
 ```
+
+**Consultation modes** (optional, defaults to "focused"):
+- `"quick"`: For simple questions. Expect 2-4 sentences. Use when you need a direct answer.
+- `"focused"`: For standard consultations. Expect 1-2 paragraphs of targeted expert input.
+- `"detailed"`: For complex questions requiring comprehensive response. Use sparingly.
+
+Examples:
+- Quick: `{"colleague": "bayes", "question": "Is log-rank appropriate for our sample size?", "mode": "quick"}`
+- Focused: `{"colleague": "greider", "question": "What biological mechanisms might explain this gene's association with treatment response?"}`
+- Detailed: `{"colleague": "shannon", "question": "Design a complete feature selection strategy for our multimodal data", "mode": "detailed"}`
 
 To request user input, use the user_input tool:
 ```tool

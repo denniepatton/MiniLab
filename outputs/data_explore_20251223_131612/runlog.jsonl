@@ -1,0 +1,2 @@
+{"type": "plan", "workflow": "data_exploration", "data_path": "ReadData/Pluvicto/", "dry_run": true, "timestamp": "2025-12-23T13:16:12.928133"}
+{"type": "complete", "status": "success", "dry_run": true, "data_files_found": 9, "artifacts": ["provenance.json", "summary.md", "runlog.jsonl", "analysis.ipynb"], "timestamp": "2025-12-23T13:16:12.929355"}

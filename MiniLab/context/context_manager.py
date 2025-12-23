@@ -199,6 +199,63 @@ class ContextManager:
         """Get the cached header for an agent."""
         return self._agent_headers.get(agent_id)
     
+    def _get_workspace_file_index(self, max_files: int = 50) -> str:
+        """
+        Generate a file index of the workspace for path awareness.
+        
+        This helps agents know the ACTUAL file paths available in the workspace
+        rather than guessing or hallucinating paths.
+        
+        Args:
+            max_files: Maximum number of files to include in the index
+            
+        Returns:
+            Formatted file index string
+        """
+        import os
+        
+        readdata_path = self.workspace_root / "ReadData"
+        if not readdata_path.exists():
+            return ""
+        
+        lines = ["## Available Data Files (ReadData/)", ""]
+        file_count = 0
+        
+        try:
+            # Walk the ReadData directory using os.walk for compatibility
+            for root, dirs, files in os.walk(readdata_path):
+                root_path = Path(root)
+                # Skip hidden directories
+                dirs[:] = [d for d in sorted(dirs) if not d.startswith('.')]
+                
+                rel_root = root_path.relative_to(self.workspace_root)
+                
+                # Get data files in this directory
+                data_files = [f for f in sorted(files) 
+                             if f.endswith(('.csv', '.tsv', '.txt', '.parquet', '.json', '.xlsx'))
+                             and not f.startswith('.')]
+                
+                if data_files:
+                    lines.append(f"**{rel_root}/**")
+                    for f in data_files:
+                        if file_count >= max_files:
+                            lines.append(f"... and more files (truncated)")
+                            break
+                        lines.append(f"  - {f}")
+                        file_count += 1
+                    lines.append("")
+                    
+                if file_count >= max_files:
+                    break
+        except Exception:
+            return ""
+        
+        if file_count == 0:
+            return ""
+        
+        lines.append("⚠️ Use EXACT paths shown above when reading data files.")
+        return "\n".join(lines)
+    
     def load_project_state(self, project_name: str) -> Optional[ProjectState]:
         """Load project state from disk."""
         state_path = self.workspace_root / "Sandbox" / project_name / "project_state.json"
@@ -497,6 +554,14 @@ class ContextManager:
                 summaries.append(project_state.execution_plan.to_context())
             
             state_summary = "\n\n".join(summaries)
+        
+        # Add workspace file index for path awareness
+        file_index = self._get_workspace_file_index()
+        if file_index:
+            if state_summary:
+                state_summary += "\n\n" + file_index
+            else:
+                state_summary = file_index
         
         return ProjectContext(
             header=header,

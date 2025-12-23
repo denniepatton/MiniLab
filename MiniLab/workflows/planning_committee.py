@@ -196,6 +196,15 @@ Present this to the committee and identify which expert should speak first.""",
                     if budget_pct >= 70:
                         budget_note = "\n\n⚠️ Budget is limited. Be VERY CONCISE (2-3 sentences max). Focus on actionable points only."
                     
+                    # Role boundaries based on agent type
+                    role_boundary = ""
+                    if next_speaker in ["bayes", "shannon", "greider"]:
+                        role_boundary = "\n\n📌 ROLE BOUNDARY: You are ADVISING on methodology. Recommend approaches with brief rationale. Do NOT write detailed frameworks, implementation plans, or comprehensive analyses. That comes later during execution. Just give your expert opinion in 2-4 sentences."
+                    elif next_speaker in ["hinton", "dayhoff"]:
+                        role_boundary = "\n\n📌 ROLE BOUNDARY: You are assessing FEASIBILITY. Note implementation considerations or concerns. Do NOT write code or detailed workflows. Save that for the execution phase."
+                    elif next_speaker in ["farber", "gould"]:
+                        role_boundary = "\n\n📌 ROLE BOUNDARY: You are providing CRITICAL PERSPECTIVE. Raise key concerns or supporting evidence. Be specific but brief."
+                    
                     contribution = await self._run_agent_task(
                         agent_name=next_speaker,
                         task=f"""You are participating in a planning committee meeting.
@@ -209,8 +218,15 @@ Discussion So Far:
 As {next_speaker}, provide your expert input on the current discussion.
 Consider your domain expertise: {', '.join(self.AGENT_EXPERTISE.get(next_speaker, []))}
 
-Be concise (2-4 sentences). Build on or respectfully disagree with previous points.
-If you believe we're ready to converge on a plan, say "I believe we have consensus on...".{budget_note}""",
+🎯 THIS IS A PLANNING DISCUSSION, NOT EXECUTION. Your job:
+- Share your expert perspective on the approach being discussed
+- Raise concerns or endorse suggestions from your domain expertise
+- Suggest specific methods or considerations relevant to your expertise
+
+FORMAT: 2-4 sentences MAX. One key point, with brief rationale.
+Do NOT provide comprehensive frameworks, detailed implementations, or exhaustive analysis.
+Build on or respectfully disagree with previous points.
+If you believe we're ready to converge on a plan, say "I believe we have consensus on...".{role_boundary}{budget_note}""",
                     )
                     
                     turn = DialogueTurn(

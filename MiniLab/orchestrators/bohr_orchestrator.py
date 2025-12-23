@@ -229,6 +229,11 @@ class BohrOrchestrator:
         self._exit_requested = False
         self._token_budget: Optional[int] = None
         self._tokens_used: int = 0
+        
+        # Budget state flags - set by _on_budget_warning
+        self._budget_percentage: float = 0.0
+        self._budget_tight: bool = False  # Set at 80%
+        self._budget_critical: bool = False  # Set at 95%
 
     def _permission_callback(self, request: str) -> bool:
         """Permission callback for tools (terminal/env). Defaults to interactive approval."""
@@ -261,14 +266,27 @@ class BohrOrchestrator:
         return "exploratory"
     
     def _on_budget_warning(self, used: int, budget: int, percentage: float) -> None:
-        """Callback when token budget warnings are triggered."""
+        """
+        Callback when token budget warnings are triggered.
+        
+        This method does three things:
+        1. Logs visual feedback to the console
+        2. Records to transcript for post-session analysis
+        3. Sets budget state flags that workflows and agents can check
+        """
         from ..utils import console
+        
+        # Update budget state (can be checked by workflows)
+        self._budget_percentage = percentage
         
         if percentage >= 95:
             console.warning(f"⚠ Token budget critical: {percentage:.0f}% used ({used:,}/{budget:,})")
-            console.agent_message("BOHR", "We're nearly at our budget limit. I'll wrap up the current task.")
+            console.agent_message("BOHR", "We're nearly at our budget limit. Wrapping up current work with available progress.")
+            self._budget_critical = True
         elif percentage >= 80:
             console.warning(f"Token budget at {percentage:.0f}% ({used:,}/{budget:,})")
+            console.agent_message("BOHR", "Budget getting constrained. Prioritizing core deliverables.")
+            self._budget_tight = True
         elif percentage >= 60:
             console.info(f"Budget update: {percentage:.0f}% used ({used:,}/{budget:,})")
         
@@ -318,6 +336,11 @@ class BohrOrchestrator:
         
         # Reset TokenAccount for new session
         self.token_account.reset()
+        
+        # Reset budget state flags
+        self._budget_percentage = 0.0
+        self._budget_tight = False
+        self._budget_critical = False
 
         # Start transcript as early as possible so project naming + consultation are captured.
         # We'll update the session name once the project name is finalized.

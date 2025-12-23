@@ -321,11 +321,27 @@ class Agent:
             query=task,
         )
         
+        # Get current budget status for context injection
+        budget_status = ""
+        try:
+            from ..core import get_token_account
+            account = get_token_account()
+            if account.budget and account.budget > 0:
+                pct_used = (account.total_used / account.budget) * 100
+                remaining = account.budget - account.total_used
+                budget_status = f"\n\n## Budget Status\n📊 {pct_used:.0f}% of session budget used ({account.total_used:,}/{account.budget:,} tokens). ~{remaining:,} remaining."
+                if pct_used >= 80:
+                    budget_status += "\n⚠️ Budget is constrained. Prioritize completing core deliverables."
+                elif pct_used >= 60:
+                    budget_status += "\n📝 Be efficient. Focus on actionable outputs."
+        except (ImportError, Exception):
+            pass  # Budget tracking not available
+        
         # Initialize messages if starting fresh
         if not state.messages:
             state.messages = [
                 {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": f"## Context\n{context.to_prompt()}\n\n## Task\n{task}"},
+                {"role": "user", "content": f"## Context\n{context.to_prompt()}{budget_status}\n\n## Task\n{task}"},
             ]
         
         # ReAct loop
@@ -562,6 +578,11 @@ class Agent:
 
                 colleague_id = colleague_data.get("colleague")
                 question = colleague_data.get("question")
+                # Optional mode field: "quick", "focused" (default), or "detailed"
+                mode = colleague_data.get("mode", "focused")
+                if mode not in ("quick", "focused", "detailed"):
+                    mode = "focused"  # Default to focused if invalid mode
+                    
                 if not isinstance(colleague_id, str) or not isinstance(question, str):
                     colleague_messages.append({
                         "role": "user",
@@ -569,7 +590,7 @@ class Agent:
                     })
                     continue
 
-                result = await self._consult_colleague(colleague_id, question, state, project_name)
+                result = await self._consult_colleague(colleague_id, question, state, project_name, mode=mode)
                 # Attribute the *next* LLM call to processing this colleague response.
                 self._next_llm_trigger = f"after_colleague:{colleague_id}"
                 colleague_messages.append({
@@ -665,8 +686,24 @@ class Agent:
         question: str,
         state: AgentState,
         project_name: str,
+        mode: str = "focused",
     ) -> str:
-        """Consult a colleague agent with visible output to user."""
+        """
+        Consult a colleague agent with visible output to user.
+        
+        Args:
+            colleague_id: ID of colleague to consult
+            question: The question to ask
+            state: Current agent state
+            project_name: Current project name
+            mode: Consultation mode - affects how colleague interprets the request:
+                - "quick": Brief, direct answer (2-4 sentences). Use for simple questions.
+                - "focused" (default): Targeted expert input (1-2 paragraphs). Standard consultation.
+                - "detailed": Comprehensive response with full reasoning. Use sparingly.
+        
+        Returns:
+            Colleague's response string
+        """
         if colleague_id not in self.colleagues:
             return f"Error: Unknown colleague '{colleague_id}'"
         
@@ -691,13 +728,35 @@ class Agent:
         state.colleague_calls.append({
             "colleague": colleague_id,
             "question": question,
+            "mode": mode,
             "timestamp": datetime.now().isoformat(),
         })
         
+        # Build consultation context based on mode
+        mode_guidance = {
+            "quick": (
+                "⚡ QUICK CONSULTATION: You are being consulted for a brief, direct answer.\n"
+                "Respond in 2-4 sentences. Give the key recommendation and essential rationale only.\n"
+                "Do NOT provide comprehensive frameworks or exhaustive explanations.\n\n"
+            ),
+            "focused": (
+                "🎯 FOCUSED CONSULTATION: You are being consulted for targeted expert input.\n"
+                "Respond in 1-2 paragraphs. Provide your recommendation, key considerations, and any critical caveats.\n"
+                "Be concise but thorough on the SPECIFIC question asked. The consulting agent will implement.\n\n"
+            ),
+            "detailed": (
+                "📋 DETAILED CONSULTATION: A comprehensive response is requested.\n"
+                "Provide full reasoning, alternatives considered, and detailed recommendations.\n"
+                "This is an exception to normal brevity norms—thoroughness is explicitly needed here.\n\n"
+            ),
+        }
+        
+        consultation_prefix = mode_guidance.get(mode, mode_guidance["focused"])
+        
         try:
-            # Execute colleague with limited iterations
+            # Execute colleague with consultation context prepended
             response = await colleague.execute(
-                task=f"[Question from {self.agent_id}]: {question}",
+                task=f"{consultation_prefix}[Question from {self.agent_id}]: {question}",
                 project_name=project_name,
                 task_id=f"{state.task_id}_consult_{colleague_id}",
             )
