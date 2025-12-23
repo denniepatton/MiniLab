@@ -106,6 +106,10 @@ class PlanningCommitteeModule(WorkflowModule):
                 error=f"Missing required inputs: {missing}",
             )
         
+        # Initialize budget tracking
+        token_budget = inputs.get("token_budget")
+        self._init_budget_tracking(token_budget)
+        
         # Restore or initialize state
         if checkpoint:
             self.restore(checkpoint)
@@ -121,7 +125,10 @@ class PlanningCommitteeModule(WorkflowModule):
                 "consensus_points": [],
             }
         
+        # Reduce max turns if budget is tight
         max_turns = inputs.get("max_turns", 15)
+        if token_budget and token_budget < 300_000:
+            max_turns = min(max_turns, 8)  # Fewer turns for smaller budgets
         
         self._log_step("Starting planning committee deliberation")
         
@@ -132,10 +139,10 @@ class PlanningCommitteeModule(WorkflowModule):
                 
                 framing_result = await self._run_agent_task(
                     agent_name="bohr",
-                    task=f"""Open a planning committee meeting for this project.
+                    task=f"""Open a planning committee meeting for this project. BE CONCISE.
 
 Project Specification:
-{inputs['project_spec']}
+{inputs['project_spec'][:2000]}
 
 Literature Background:
 {inputs['literature_summary']}
@@ -168,6 +175,12 @@ Present this to the committee and identify which expert should speak first.""",
                 turn_number = len(self._state["dialogue"])
                 
                 while turn_number < max_turns:
+                    # Check budget before each turn
+                    within_budget, budget_pct = self._check_workflow_budget()
+                    if budget_pct >= 90:
+                        self._log_step(f"Budget limit reached at turn {turn_number}, moving to synthesis")
+                        break
+                    
                     # Select next speaker based on context
                     next_speaker = await self._select_next_speaker()
                     
@@ -178,6 +191,11 @@ Present this to the committee and identify which expert should speak first.""",
                     # Get contribution from selected speaker
                     dialogue_history = self._format_dialogue_history()
                     
+                    # Add budget guidance if getting close
+                    budget_note = ""
+                    if budget_pct >= 70:
+                        budget_note = "\n\n⚠️ Budget is limited. Be VERY CONCISE (2-3 sentences max). Focus on actionable points only."
+                    
                     contribution = await self._run_agent_task(
                         agent_name=next_speaker,
                         task=f"""You are participating in a planning committee meeting.
@@ -186,13 +204,13 @@ Project Context:
 {inputs['project_spec'][:500]}...
 
 Discussion So Far:
-{dialogue_history}
+{dialogue_history[-2000:]}
 
 As {next_speaker}, provide your expert input on the current discussion.
 Consider your domain expertise: {', '.join(self.AGENT_EXPERTISE.get(next_speaker, []))}
 
-Be concise but substantive. Build on or respectfully disagree with previous points.
-If you believe we're ready to converge on a plan, say "I believe we have consensus on...".""",
+Be concise (2-4 sentences). Build on or respectfully disagree with previous points.
+If you believe we're ready to converge on a plan, say "I believe we have consensus on...".{budget_note}""",
                     )
                     
                     turn = DialogueTurn(

@@ -92,6 +92,17 @@ class WorkflowModule(ABC):
     primary_agents: list[str] = []
     supporting_agents: list[str] = []
     
+    # Budget allocation hints (percentage of total session budget)
+    # Workflows should self-regulate based on these guidelines
+    BUDGET_ALLOCATION = {
+        "consultation": 0.05,      # 5% - Quick, focused
+        "literature_review": 0.20, # 20% - Important but bounded
+        "planning_committee": 0.15,# 15% - Deliberation
+        "execute_analysis": 0.35,  # 35% - Core work
+        "writeup_results": 0.15,   # 15% - Documentation
+        "critical_review": 0.10,   # 10% - Quality check
+    }
+    
     def __init__(
         self,
         agents: dict,  # Dict of agent_name -> Agent instance
@@ -112,6 +123,8 @@ class WorkflowModule(ABC):
         self._status = WorkflowStatus.NOT_STARTED
         self._current_step = 0
         self._state: dict[str, Any] = {}
+        self._workflow_budget: Optional[int] = None
+        self._workflow_start_tokens: int = 0
     
     @property
     def status(self) -> WorkflowStatus:
@@ -292,3 +305,55 @@ class WorkflowModule(ABC):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a") as f:
             f.write(log_entry + "\n")
+    
+    def _init_budget_tracking(self, session_budget: Optional[int] = None) -> None:
+        """
+        Initialize budget tracking for this workflow.
+        
+        Called at start of execute() to set up budget awareness.
+        """
+        try:
+            from ..core import get_token_account
+            account = get_token_account()
+            self._workflow_start_tokens = account.total_used
+            
+            if session_budget:
+                allocation = self.BUDGET_ALLOCATION.get(self.name, 0.15)
+                self._workflow_budget = int(session_budget * allocation)
+        except ImportError:
+            pass
+    
+    def _check_workflow_budget(self) -> tuple[bool, float]:
+        """
+        Check if workflow is within its budget allocation.
+        
+        Returns:
+            Tuple of (within_budget, percentage_of_workflow_budget_used)
+        """
+        try:
+            from ..core import get_token_account
+            account = get_token_account()
+            
+            workflow_used = account.total_used - self._workflow_start_tokens
+            
+            if self._workflow_budget:
+                pct = (workflow_used / self._workflow_budget) * 100
+                return pct < 100, pct
+            
+            return True, 0.0
+        except ImportError:
+            return True, 0.0
+    
+    def _get_budget_guidance(self) -> str:
+        """
+        Get budget guidance message for agents.
+        
+        Returns string to include in agent prompts when budget is constrained.
+        """
+        within_budget, pct = self._check_workflow_budget()
+        
+        if pct >= 80:
+            return f"\n⚠️ BUDGET ALERT: This workflow has used {pct:.0f}% of its allocation. Be CONCISE. Skip optional steps. Prioritize core deliverables.\n"
+        elif pct >= 60:
+            return f"\n📊 Budget note: {pct:.0f}% of workflow allocation used. Be efficient in remaining steps.\n"
+        return ""

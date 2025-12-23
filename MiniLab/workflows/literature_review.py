@@ -87,6 +87,12 @@ class LiteratureReviewModule(WorkflowModule):
         token_budget = inputs.get("token_budget")
         user_preferences = inputs.get("user_preferences", "")
         explicit_mode = inputs.get("review_mode")  # Only if user explicitly requested
+<<<<<<< Updated upstream
+=======
+        
+        # Initialize budget tracking for this workflow
+        self._init_budget_tracking(token_budget)
+>>>>>>> Stashed changes
         
         # Restore or initialize state
         if checkpoint:
@@ -135,7 +141,18 @@ class LiteratureReviewModule(WorkflowModule):
                 user_prefs = self._state.get("user_preferences", "")
                 budget_context = ""
                 if self._state.get("token_budget"):
+<<<<<<< Updated upstream
                     budget_context = f"\nToken budget for this session: {self._state['token_budget']:,} tokens. Be mindful of this when deciding scope."
+=======
+                    # Calculate workflow-specific budget (20% of total for lit review)
+                    workflow_budget = int(self._state['token_budget'] * 0.20)
+                    budget_context = f"""
+BUDGET CONSTRAINT: This workflow has ~{workflow_budget:,} tokens allocated (20% of session budget).
+- Keep searches FOCUSED: 2-4 queries max
+- Limit to most relevant papers only
+- Skip methodology analysis unless essential
+- Save budget for later analysis phases"""
+>>>>>>> Stashed changes
                 
                 planning_result = await self._run_agent_task(
                     agent_name="gould",
@@ -157,10 +174,17 @@ Your task:
    - Are there specialized methodological papers we need?
 
 2. PLAN your approach (output as JSON at the end):
+<<<<<<< Updated upstream
    - num_search_queries: How many distinct search queries (2-10)
    - papers_per_query: Results per query (3-10)
    - include_methodology_analysis: true/false (involve Feynman for technical papers?)
    - include_critical_assessment: true/false (involve Farber for quality review?)
+=======
+   - num_search_queries: How many distinct search queries (2-4 recommended to stay within budget)
+   - papers_per_query: Results per query (3-5 recommended)
+   - include_methodology_analysis: true/false (involve Feynman for technical papers? Skip if budget is tight)
+   - include_critical_assessment: true/false (involve Farber for quality review? Skip if budget is tight)
+>>>>>>> Stashed changes
    - search_sources: ["pubmed", "arxiv"] or just one if appropriate
    
 3. Generate your search queries based on the topic.
@@ -207,6 +231,7 @@ Focus on quality over quantity. Include foundational works even if older.""",
                 self._current_step = 2
                 self.save_checkpoint()
             
+<<<<<<< Updated upstream
             # Step 3: Optional methodology analysis (if Gould decided it's needed)
             plan = self._state.get("review_plan", {})
             if self._current_step <= 2 and plan.get("include_methodology_analysis", False):
@@ -215,10 +240,28 @@ Focus on quality over quantity. Include foundational works even if older.""",
                 method_result = await self._run_agent_task(
                     agent_name="feynman",
                     task=f"""Review the methodological aspects of these papers.
+=======
+            # Step 3: Optional methodology analysis (if Gould decided it's needed AND budget allows)
+            plan = self._state.get("review_plan", {})
+            within_budget, budget_pct = self._check_workflow_budget()
+            
+            if self._current_step <= 2 and plan.get("include_methodology_analysis", False):
+                # Skip if over budget
+                if budget_pct >= 80:
+                    console.info("Skipping methodology analysis due to budget constraints")
+                    self._state["methodology_notes"] = "(Skipped due to budget constraints)"
+                else:
+                    console.info("Feynman analyzing methodological papers...")
+                    
+                    method_result = await self._run_agent_task(
+                        agent_name="feynman",
+                        task=f"""Review the methodological aspects of these papers. BE CONCISE - 1-2 paragraphs max.
+>>>>>>> Stashed changes
 
 Research Topic: {inputs['research_topic']}
 
 Papers Found:
+<<<<<<< Updated upstream
 {self._state['search_results']}
 
 Identify:
@@ -231,11 +274,20 @@ Focus on the 'how' - what techniques enable this research?""",
                 )
                 
                 self._state["methodology_notes"] = method_result.get("response", "")
+=======
+{self._state['search_results'][:3000]}
+
+Identify the top 3-4 key methods used and briefly note their relevance.""",
+                    )
+                    
+                    self._state["methodology_notes"] = method_result.get("response", "")
+>>>>>>> Stashed changes
                 self._current_step = 3
                 self.save_checkpoint()
             elif self._current_step <= 2:
                 self._current_step = 3
             
+<<<<<<< Updated upstream
             # Step 4: Optional critical assessment (if Gould decided it's needed)
             if self._current_step <= 3 and plan.get("include_critical_assessment", False):
                 console.info("Farber providing critical assessment...")
@@ -243,10 +295,27 @@ Focus on the 'how' - what techniques enable this research?""",
                 critique_result = await self._run_agent_task(
                     agent_name="farber",
                     task=f"""Critically assess the relevance and quality of this literature.
+=======
+            # Step 4: Optional critical assessment (if Gould decided it's needed AND budget allows)
+            within_budget, budget_pct = self._check_workflow_budget()
+            
+            if self._current_step <= 3 and plan.get("include_critical_assessment", False):
+                # Skip if over budget
+                if budget_pct >= 85:
+                    console.info("Skipping critical assessment due to budget constraints")
+                    self._state["critical_assessment"] = "(Skipped due to budget constraints)"
+                else:
+                    console.info("Farber providing critical assessment...")
+                    
+                    critique_result = await self._run_agent_task(
+                        agent_name="farber",
+                        task=f"""Briefly assess the relevance of this literature. BE CONCISE - 1 paragraph.
+>>>>>>> Stashed changes
 
 Research Topic: {inputs['research_topic']}
 
 Papers Found:
+<<<<<<< Updated upstream
 {self._state['search_results']}
 
 Assess:
@@ -259,6 +328,14 @@ Be constructive but thorough.""",
                 )
                 
                 self._state["critical_assessment"] = critique_result.get("response", "")
+=======
+{self._state['search_results'][:2000]}
+
+Note any obvious gaps or concerns in 2-3 sentences.""",
+                    )
+                    
+                    self._state["critical_assessment"] = critique_result.get("response", "")
+>>>>>>> Stashed changes
                 self._current_step = 4
                 self.save_checkpoint()
             elif self._current_step <= 3:
