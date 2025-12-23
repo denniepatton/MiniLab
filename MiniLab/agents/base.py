@@ -156,6 +156,21 @@ class Agent:
     COLLEAGUE_PATTERN = re.compile(r"```colleague\s*(.*?)\s*```", re.DOTALL)
     DONE_PATTERN = re.compile(r"```done\s*(.*?)\s*```", re.DOTALL)
     EXTEND_PATTERN = re.compile(r"```extend\s*(.*?)\s*```", re.DOTALL)
+
+    # Unified ordered parser for multiple action blocks
+    ACTION_BLOCK_PATTERN = re.compile(
+        r"```(tool|colleague|done|extend)\s*(.*?)\s*```",
+        re.DOTALL,
+    )
+
+    def _strip_action_blocks_for_transcript(self, text: str) -> str:
+        """Remove tool/colleague/done/extend fenced blocks for transcript readability."""
+        if not text:
+            return ""
+        cleaned = self.ACTION_BLOCK_PATTERN.sub("", text)
+        # Also remove any now-empty triple-backtick remnants (defensive)
+        cleaned = re.sub(r"```\s*```", "", cleaned)
+        return cleaned.strip()
     
     def __init__(
         self,
@@ -208,6 +223,13 @@ class Agent:
         # Callbacks
         self.on_message: Optional[Callable[[str, str], None]] = None  # (agent_id, message)
         self.on_tool_call: Optional[Callable[[str, str, dict], None]] = None  # (tool, action, params)
+        self.on_stream_chunk: Optional[Callable[[str, str], None]] = None  # (agent_id, chunk)
+        
+        # Streaming mode
+        self.streaming_enabled: bool = False
+
+        # Token attribution: what triggered the next LLM call
+        self._next_llm_trigger: Optional[str] = None
     
     def set_transcript(self, transcript_logger: Any) -> None:
         """Set the transcript logger for this agent."""
@@ -216,6 +238,24 @@ class Agent:
     def set_colleagues(self, colleagues: dict[str, Agent]) -> None:
         """Set colleague references."""
         self.colleagues = colleagues
+    
+    def enable_streaming(
+        self,
+        on_chunk: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
+        """
+        Enable streaming output for this agent.
+        
+        Args:
+            on_chunk: Callback receiving (agent_id, text_chunk) for each streamed chunk
+        """
+        self.streaming_enabled = True
+        if on_chunk:
+            self.on_stream_chunk = on_chunk
+    
+    def disable_streaming(self) -> None:
+        """Disable streaming output."""
+        self.streaming_enabled = False
     
     def _report_activity(self, activity: str) -> None:
         """Report current activity to the global spinner."""
@@ -321,6 +361,11 @@ class Agent:
                 if account.is_budget_exceeded():
                     state.status = AgentStatus.COMPLETED
                     state.completed_at = datetime.now()
+                    if self.transcript:
+                        self.transcript.log_agent_message(
+                            agent_name=self.agent_id,
+                            message="Budget limit reached - wrapping up with current progress",
+                        )
                     return AgentResponse(
                         status=AgentStatus.COMPLETED,
                         result="Budget limit reached - wrapping up with current progress",
@@ -333,9 +378,29 @@ class Agent:
             
             state.iteration += 1
             
-            # Call LLM
+            # Call LLM (with streaming if enabled)
             try:
-                response = await self.llm.acomplete(state.messages)
+                from ..core.token_context import token_context
+
+                trigger = self._next_llm_trigger
+                if not trigger:
+                    trigger = "initial" if state.iteration == 1 else "react_loop"
+                self._next_llm_trigger = None
+
+                if self.streaming_enabled and hasattr(self.llm, 'acomplete_streaming'):
+                    # Use streaming completion with chunk callback
+                    def on_chunk(chunk: str) -> None:
+                        if self.on_stream_chunk:
+                            self.on_stream_chunk(self.agent_id, chunk)
+
+                    with token_context(trigger=trigger):
+                        response = await self.llm.acomplete_streaming(
+                            state.messages,
+                            on_chunk=on_chunk,
+                        )
+                else:
+                    with token_context(trigger=trigger):
+                        response = await self.llm.acomplete(state.messages)
             except Exception as e:
                 state.status = AgentStatus.FAILED
                 state.completed_at = datetime.now()
@@ -347,6 +412,15 @@ class Agent:
             
             # Append assistant response
             state.messages.append({"role": "assistant", "content": response})
+
+            # Log narrative content (not the raw action blocks) to transcript so consultations are visible.
+            if self.transcript:
+                narrative = self._strip_action_blocks_for_transcript(response)
+                if narrative:
+                    self.transcript.log_agent_message(
+                        agent_name=self.agent_id,
+                        message=narrative,
+                    )
             
             # Notify callback
             if self.on_message:
@@ -367,19 +441,9 @@ class Agent:
                     colleague_calls=len(state.colleague_calls),
                 )
             
-            elif action_result["type"] == "tool":
-                # Append tool result to messages
-                state.messages.append({
-                    "role": "user",
-                    "content": f"Tool result:\n{action_result['result']}",
-                })
-            
-            elif action_result["type"] == "colleague":
-                # Append colleague response to messages
-                state.messages.append({
-                    "role": "user",
-                    "content": f"Response from {action_result['colleague']}:\n{action_result['result']}",
-                })
+            elif action_result["type"] in {"tool", "tool_batch", "colleague", "colleague_batch", "action_batch"}:
+                for msg in action_result.get("messages", []):
+                    state.messages.append(msg)
             
             elif action_result["type"] == "extend":
                 # Agent requested more iterations
@@ -420,54 +484,113 @@ class Agent:
         - type: 'done', 'tool', 'colleague', 'extend', 'continue'
         - Additional fields based on type
         """
-        # Check for done
-        done_match = self.DONE_PATTERN.search(response)
-        if done_match:
-            try:
-                done_data = json.loads(done_match.group(1))
-                return {
-                    "type": "done",
-                    "result": done_data.get("result"),
-                    "outputs": done_data.get("outputs", []),
-                }
-            except json.JSONDecodeError:
-                return {"type": "done", "result": done_match.group(1)}
-        
-        # Check for tool call
-        tool_match = self.TOOL_PATTERN.search(response)
-        if tool_match:
-            try:
-                tool_data = json.loads(tool_match.group(1))
+        matches = list(self.ACTION_BLOCK_PATTERN.finditer(response))
+        if not matches:
+            return {"type": "continue"}
+
+        messages_to_append: list[dict[str, str]] = []
+        tool_messages: list[dict[str, str]] = []
+        colleague_messages: list[dict[str, str]] = []
+        extend_requested = False
+
+        for m in matches:
+            block_type = m.group(1)
+            payload = (m.group(2) or "").strip()
+
+            if block_type == "extend":
+                extend_requested = True
+                continue
+
+            if block_type == "done":
+                try:
+                    done_data = json.loads(payload) if payload else {}
+                    return {
+                        "type": "done",
+                        "result": done_data.get("result"),
+                        "outputs": done_data.get("outputs", []),
+                    }
+                except json.JSONDecodeError:
+                    return {"type": "done", "result": payload}
+
+            if block_type == "tool":
+                try:
+                    tool_data = json.loads(payload)
+                except json.JSONDecodeError as e:
+                    tool_messages.append({
+                        "role": "user",
+                        "content": f"Tool result:\nError parsing tool call JSON: {e}",
+                    })
+                    continue
+
                 tool_name = tool_data.get("tool")
                 action = tool_data.get("action")
                 params = tool_data.get("params", {})
-                
+
+                if not isinstance(tool_name, str) or not isinstance(action, str):
+                    tool_messages.append({
+                        "role": "user",
+                        "content": f"Tool result:\nError: tool call missing required string fields 'tool' and 'action'. Payload={tool_data}",
+                    })
+                    continue
+                if params is None:
+                    params = {}
+                if not isinstance(params, dict):
+                    tool_messages.append({
+                        "role": "user",
+                        "content": f"Tool result:\nError: 'params' must be an object/dict. tool={tool_name} action={action}",
+                    })
+                    continue
+
                 result = await self._execute_tool(tool_name, action, params, state)
-                return {"type": "tool", "result": result}
-            except json.JSONDecodeError as e:
-                return {"type": "tool", "result": f"Error parsing tool call: {e}"}
-        
-        # Check for colleague call
-        colleague_match = self.COLLEAGUE_PATTERN.search(response)
-        if colleague_match:
-            try:
-                colleague_data = json.loads(colleague_match.group(1))
+                # Attribute the *next* LLM call to processing this tool result.
+                self._next_llm_trigger = f"after_tool:{tool_name}.{action}"
+                tool_messages.append({
+                    "role": "user",
+                    "content": f"Tool result ({tool_name}.{action}):\n{result}",
+                })
+                continue
+
+            if block_type == "colleague":
+                try:
+                    colleague_data = json.loads(payload)
+                except json.JSONDecodeError as e:
+                    colleague_messages.append({
+                        "role": "user",
+                        "content": f"Colleague result:\nError parsing colleague call JSON: {e}",
+                    })
+                    continue
+
                 colleague_id = colleague_data.get("colleague")
                 question = colleague_data.get("question")
-                
-                result = await self._consult_colleague(
-                    colleague_id, question, state, project_name
-                )
-                return {"type": "colleague", "colleague": colleague_id, "result": result}
-            except json.JSONDecodeError as e:
-                return {"type": "colleague", "result": f"Error parsing colleague call: {e}"}
-        
-        # Check for extend request
-        extend_match = self.EXTEND_PATTERN.search(response)
-        if extend_match:
+                if not isinstance(colleague_id, str) or not isinstance(question, str):
+                    colleague_messages.append({
+                        "role": "user",
+                        "content": f"Colleague result:\nError: colleague call missing required string fields 'colleague' and 'question'. Payload={colleague_data}",
+                    })
+                    continue
+
+                result = await self._consult_colleague(colleague_id, question, state, project_name)
+                # Attribute the *next* LLM call to processing this colleague response.
+                self._next_llm_trigger = f"after_colleague:{colleague_id}"
+                colleague_messages.append({
+                    "role": "user",
+                    "content": f"Response from {colleague_id}:\n{result}",
+                })
+                continue
+
+        if tool_messages and colleague_messages:
+            messages_to_append = tool_messages + colleague_messages
+            return {"type": "action_batch", "messages": messages_to_append}
+
+        if tool_messages:
+            return {"type": "tool_batch", "messages": tool_messages}
+
+        if colleague_messages:
+            return {"type": "colleague_batch", "messages": colleague_messages}
+
+        if extend_requested:
             return {"type": "extend"}
-        
-        # No action found
+
         return {"type": "continue"}
     
     async def _execute_tool(
@@ -679,10 +802,10 @@ class Agent:
     def _clean_tool_blocks(self, text: str) -> str:
         """Remove tool call blocks from text for clean display."""
         import re
-        # Remove ```tool ... ``` blocks
-        cleaned = re.sub(r'```tool\s*\{[^}]+\}\s*```', '', text, flags=re.DOTALL)
-        # Remove ```colleague ... ``` blocks  
-        cleaned = re.sub(r'```colleague\s*\{[^}]+\}\s*```', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"```tool\s*.*?```", "", text, flags=re.DOTALL)
+        cleaned = re.sub(r"```colleague\s*.*?```", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"```done\s*.*?```", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"```extend\s*.*?```", "", cleaned, flags=re.DOTALL)
         # Clean up extra whitespace
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.strip()

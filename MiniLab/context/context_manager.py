@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -201,14 +202,14 @@ class ContextManager:
     def load_project_state(self, project_name: str) -> Optional[ProjectState]:
         """Load project state from disk."""
         state_path = self.workspace_root / "Sandbox" / project_name / "project_state.json"
-        
+
         if state_path.exists():
             state = ProjectState.load(str(state_path))
             self._project_states[project_name] = state
             return state
-        
+
         return None
-    
+
     def save_project_state(self, project_name: str) -> None:
         """Save project state to disk."""
         if project_name in self._project_states:
@@ -276,12 +277,22 @@ class ContextManager:
         """
         if not file_path.exists():
             return 0
-        
-        content = file_path.read_text()
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return 0
+
+        # Unique + stable doc_id prefix to prevent collisions across directories
+        try:
+            rel = str(file_path.relative_to(self.workspace_root))
+        except Exception:
+            rel = str(file_path)
+        rel_hash = hashlib.sha1(rel.encode("utf-8", errors="ignore")).hexdigest()[:12]
         chunks = self._chunk_text(content, chunk_size, chunk_overlap)
         
         for i, chunk in enumerate(chunks):
-            doc_id = f"{file_path.name}_{i}"
+            doc_id = f"file:{rel_hash}:{i}"
             self.index_document(
                 project_name=project_name,
                 doc_id=doc_id,
@@ -289,6 +300,7 @@ class ContextManager:
                 metadata={
                     "type": "file",
                     "source": str(file_path),
+                    "source_rel": rel,
                     "chunk_index": i,
                     "file_type": file_path.suffix,
                 },

@@ -59,6 +59,7 @@ class OpenAIBackend(LLMBackend):
         # Update global TokenAccount
         try:
             from ..core import get_token_account
+            from ..core.token_context import get_workflow, get_trigger
             account = get_token_account()
             if account._budget is not None:  # Only track if budget set
                 account.debit(
@@ -66,6 +67,8 @@ class OpenAIBackend(LLMBackend):
                     output_tokens=output_tokens,
                     agent_id=self.agent_id,
                     operation=operation,
+                    workflow=get_workflow(),
+                    trigger=get_trigger(),
                 )
         except Exception:
             pass  # Fail silently if TokenAccount not available

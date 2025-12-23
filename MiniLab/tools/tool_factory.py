@@ -12,7 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from ..security import PathGuard
+from ..context import ContextManager
+
+from ..security import PathGuard, AgentPermissions
+from ..config.team_loader import get_team_config
 from .base import Tool, ToolRegistry
 from .filesystem import FileSystemTool
 from .code_editor import CodeEditorTool
@@ -25,50 +28,19 @@ from .arxiv import ArxivTool
 from .citation import CitationTool
 
 
-# Define which tools each agent can use (read-only tools are shared, write tools vary)
-AGENT_TOOL_PERMISSIONS = {
-    # Synthesis Guild
-    "bohr": {
-        "tools": ["filesystem", "user_input", "web_search", "pubmed", "arxiv", "citation", "environment"],
-        "write_tools": [],  # Bohr delegates writing to specialists
-    },
-    "gould": {
-        "tools": ["filesystem", "user_input", "web_search", "pubmed", "arxiv", "citation"],
-        "write_tools": ["filesystem", "citation"],  # Can write documents, bibliography
-    },
-    "farber": {
-        "tools": ["filesystem", "user_input", "web_search", "pubmed", "citation"],
-        "write_tools": ["filesystem"],  # Can write reviews
-    },
-    
-    # Theory Guild
-    "feynman": {
-        "tools": ["filesystem", "user_input", "web_search", "pubmed", "arxiv"],
-        "write_tools": ["filesystem"],  # Can write notes
-    },
-    "shannon": {
-        "tools": ["filesystem", "user_input", "web_search", "arxiv"],
-        "write_tools": ["filesystem"],  # Can write notes
-    },
-    "greider": {
-        "tools": ["filesystem", "user_input", "web_search", "pubmed"],
-        "write_tools": ["filesystem"],  # Can write notes
-    },
-    
-    # Implementation Guild
-    "dayhoff": {
-        "tools": ["filesystem", "user_input", "web_search", "pubmed"],
-        "write_tools": ["filesystem"],  # Can write execution plans
-    },
-    "hinton": {
-        "tools": ["filesystem", "code_editor", "terminal", "user_input", "environment"],
-        "write_tools": ["filesystem", "code_editor", "terminal"],  # Full code access
-    },
-    "bayes": {
-        "tools": ["filesystem", "code_editor", "terminal", "user_input"],
-        "write_tools": ["filesystem", "code_editor", "terminal"],  # Statistical code access
-    },
-}
+def _default_agent_permissions() -> dict[str, dict[str, list[str]]]:
+    """Backwards-compatible fallback tool permissions."""
+    return {
+        "bohr": {"tools": ["filesystem", "user_input", "web_search", "pubmed", "arxiv", "citation", "environment"], "write_tools": []},
+        "gould": {"tools": ["filesystem", "user_input", "web_search", "pubmed", "arxiv", "citation"], "write_tools": ["filesystem", "citation"]},
+        "farber": {"tools": ["filesystem", "user_input", "web_search", "pubmed", "citation"], "write_tools": ["filesystem"]},
+        "feynman": {"tools": ["filesystem", "user_input", "web_search", "pubmed", "arxiv"], "write_tools": ["filesystem"]},
+        "shannon": {"tools": ["filesystem", "user_input", "web_search", "arxiv"], "write_tools": ["filesystem"]},
+        "greider": {"tools": ["filesystem", "user_input", "web_search", "pubmed"], "write_tools": ["filesystem"]},
+        "dayhoff": {"tools": ["filesystem", "user_input", "web_search", "pubmed"], "write_tools": ["filesystem"]},
+        "hinton": {"tools": ["filesystem", "code_editor", "terminal", "user_input", "environment"], "write_tools": ["filesystem", "code_editor", "terminal"]},
+        "bayes": {"tools": ["filesystem", "code_editor", "terminal", "user_input"], "write_tools": ["filesystem", "code_editor", "terminal"]},
+    }
 
 
 class ToolFactory:
@@ -87,6 +59,7 @@ class ToolFactory:
         workspace_root: Path,
         input_callback: Optional[Callable[[str, Optional[list[str]]], str]] = None,
         permission_callback: Optional[Callable[[str], bool]] = None,
+        context_manager: Optional[ContextManager] = None,
     ):
         """
         Initialize the tool factory.
@@ -99,10 +72,32 @@ class ToolFactory:
         self.workspace_root = workspace_root
         self.input_callback = input_callback
         self.permission_callback = permission_callback
+        self.context_manager = context_manager
+
+        # Load team config (single source of truth)
+        self.team_config = None
+        try:
+            self.team_config = get_team_config()
+        except Exception:
+            self.team_config = None
         
         # Initialize PathGuard singleton
         PathGuard.reset()
         self.path_guard = PathGuard(workspace_root)
+
+        # Apply agent security permissions from config
+        if self.team_config:
+            for agent_id, cfg in self.team_config.get_all_agents().items():
+                self.path_guard.set_agent_permissions(
+                    agent_id,
+                    AgentPermissions(
+                        agent_id=agent_id,
+                        writable_subdirs=list(cfg.security.writable_subdirs),
+                        writable_extensions=list(cfg.security.writable_extensions),
+                        can_execute_shell=bool(cfg.security.can_execute_shell),
+                        can_modify_environment=bool(cfg.security.can_modify_environment),
+                    ),
+                )
         
         # Registry for all created tools
         self.registry = ToolRegistry()
@@ -112,7 +107,8 @@ class ToolFactory:
         self.input_callback = callback
         
         # Update existing user_input tools
-        for agent_id in AGENT_TOOL_PERMISSIONS:
+        agent_ids = self.team_config.get_agent_ids() if self.team_config else list(_default_agent_permissions().keys())
+        for agent_id in agent_ids:
             tool = self.registry.get_tool(agent_id, "user_input")
             if tool and isinstance(tool, UserInputTool):
                 tool.set_input_callback(callback)
@@ -124,7 +120,8 @@ class ToolFactory:
         This passes the user's natural language preferences (from consultation)
         to enable contextual autonomy decisions.
         """
-        for agent_id in AGENT_TOOL_PERMISSIONS:
+        agent_ids = self.team_config.get_agent_ids() if self.team_config else list(_default_agent_permissions().keys())
+        for agent_id in agent_ids:
             tool = self.registry.get_tool(agent_id, "user_input")
             if tool and isinstance(tool, UserInputTool):
                 tool.set_user_preferences(preferences)
@@ -138,6 +135,7 @@ class ToolFactory:
         common_kwargs = {
             "agent_id": agent_id,
             "permission_callback": self.permission_callback,
+            "context_manager": self.context_manager,
         }
         
         if tool_name == "filesystem":
@@ -187,7 +185,15 @@ class ToolFactory:
             Dict mapping tool names to Tool instances
         """
         agent_id = agent_id.lower()
-        permissions = AGENT_TOOL_PERMISSIONS.get(agent_id, {"tools": [], "write_tools": []})
+
+        if self.team_config:
+            cfg = self.team_config.get_agent(agent_id)
+            permissions = {
+                "tools": list(cfg.tools) if cfg else [],
+                "write_tools": list(cfg.write_tools) if cfg else [],
+            }
+        else:
+            permissions = _default_agent_permissions().get(agent_id, {"tools": [], "write_tools": []})
         
         tools = {}
         for tool_name in permissions["tools"]:
@@ -206,7 +212,8 @@ class ToolFactory:
             Dict mapping agent_id to dict of tools
         """
         all_tools = {}
-        for agent_id in AGENT_TOOL_PERMISSIONS:
+        agent_ids = self.team_config.get_agent_ids() if self.team_config else list(_default_agent_permissions().keys())
+        for agent_id in agent_ids:
             all_tools[agent_id] = self.create_tools_for_agent(agent_id)
         return all_tools
     
@@ -230,7 +237,14 @@ class ToolFactory:
         """
         agent_id = agent_id.lower()
         tools = self.registry.get_agent_tools(agent_id)
-        permissions = AGENT_TOOL_PERMISSIONS.get(agent_id, {"tools": [], "write_tools": []})
+        if self.team_config:
+            cfg = self.team_config.get_agent(agent_id)
+            permissions = {
+                "tools": list(cfg.tools) if cfg else [],
+                "write_tools": list(cfg.write_tools) if cfg else [],
+            }
+        else:
+            permissions = _default_agent_permissions().get(agent_id, {"tools": [], "write_tools": []})
         
         lines = [
             "## Available Tools",

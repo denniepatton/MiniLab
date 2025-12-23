@@ -223,14 +223,40 @@ class AgentPrompt:
 
 ### Failure/Escalation (Stop and Report When)
 {failure_list}
-
-Maximum iterations: {self.max_iterations}
 """)
         
         # Communication style
         if self.communication_style:
             sections.append(f"""## COMMUNICATION STYLE
 {self.communication_style}
+""")
+        
+        # Add flexibility guidance - agents have autonomy
+        sections.append("""## AUTONOMY AND FLEXIBILITY
+
+You have SIGNIFICANT AUTONOMY in how you accomplish tasks. These principles guide your work:
+
+### Decision-Making Authority
+- You decide HOW to accomplish tasks, not just execute prescriptions
+- You can skip, combine, or reorder steps based on your judgment
+- You consult colleagues when YOU see value, not on a fixed schedule
+- You manage your own approach within the budget constraints
+
+### Self-Assessment
+As you work, assess yourself on:
+- **Progress**: Are core deliverables taking shape?
+- **Quality**: Is the output usable and correct?
+- **Efficiency**: Am I using budget wisely?
+
+### When to Wrap Up
+- Core deliverables are complete (good enough > perfect)
+- Additional work has diminishing returns
+- Budget guidance indicates time to finish
+
+### Guardrails (The ONLY hard constraints)
+- Never fabricate data or citations
+- Never access paths outside ReadData/ or Sandbox/
+- Always stop when explicitly asked
 """)
         
         # Termination handling (for Bohr)

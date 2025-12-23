@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from ..context import ContextManager
+
 
 class ProjectWriter:
     """
@@ -65,7 +67,10 @@ class ProjectWriter:
         self, 
         project_path: Path,
         project_name: str,
-        session_date: Optional[datetime] = None
+        session_date: Optional[datetime] = None,
+        context_manager: Optional[ContextManager] = None,
+        auto_index: bool = True,
+        max_index_bytes: int = 2_000_000,
     ):
         """
         Initialize ProjectWriter.
@@ -79,9 +84,35 @@ class ProjectWriter:
         self.project_name = project_name
         self.session_date = session_date or datetime.now()
         self._created_files: list[str] = []
+
+        self.context_manager = context_manager
+        self.auto_index = auto_index
+        self.max_index_bytes = max_index_bytes
         
         # Ensure project directory exists
         self.project_path.mkdir(parents=True, exist_ok=True)
+
+    def _should_index(self, path: Path) -> bool:
+        if not self.auto_index or not self.context_manager:
+            return False
+        if not path.exists() or not path.is_file():
+            return False
+        try:
+            if path.stat().st_size > self.max_index_bytes:
+                return False
+        except Exception:
+            return False
+        ext = path.suffix.lower()
+        return ext in {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".toml", ".csv"} or ext == ""
+
+    def _maybe_index(self, path: Path) -> None:
+        if not self._should_index(path):
+            return
+        try:
+            # ContextManager stores are keyed by Sandbox/<project_slug> directory name.
+            self.context_manager.index_file(project_name=self.project_path.name, file_path=path)
+        except Exception:
+            pass
     
     @property
     def date_string(self) -> str:
@@ -123,6 +154,7 @@ class ProjectWriter:
         
         filepath.write_text(full_content)
         self._created_files.append(str(filepath))
+        self._maybe_index(filepath)
         return filepath
     
     def write_data_manifest(self, manifest: dict[str, Any]) -> Optional[Path]:
@@ -157,6 +189,7 @@ class ProjectWriter:
         
         filepath.write_text(content)
         self._created_files.append(str(filepath))
+        self._maybe_index(filepath)
         return filepath
     
     def write_literature_summary(self, content: str) -> Path:
@@ -171,6 +204,7 @@ class ProjectWriter:
         
         filepath.write_text(full_content)
         self._created_files.append(str(filepath))
+        self._maybe_index(filepath)
         return filepath
     
     def write_bibliography(self, content: str) -> Path:
@@ -185,6 +219,7 @@ class ProjectWriter:
         
         filepath.write_text(full_content)
         self._created_files.append(str(filepath))
+        self._maybe_index(filepath)
         return filepath
     
     def write_session_summary(
@@ -231,6 +266,43 @@ class ProjectWriter:
         
         filepath.write_text(content)
         self._created_files.append(str(filepath))
+        self._maybe_index(filepath)
+        return filepath
+
+    def write_token_accounting(
+        self,
+        *,
+        token_usage: dict[str, Any],
+        transactions: list[Any],
+        aggregates: dict[str, Any],
+    ) -> Path:
+        """Persist authoritative token accounting artifacts for calibration/debugging."""
+        out_dir = self.project_path / "analysis"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        filepath = out_dir / "token_accounting.json"
+
+        def _tx_to_dict(t: Any) -> dict[str, Any]:
+            return {
+                "timestamp": getattr(t, "timestamp", None).isoformat() if getattr(t, "timestamp", None) else None,
+                "agent_id": getattr(t, "agent_id", None),
+                "workflow": getattr(t, "workflow", None),
+                "trigger": getattr(t, "trigger", None),
+                "operation": getattr(t, "operation", None),
+                "input_tokens": getattr(t, "input_tokens", 0),
+                "output_tokens": getattr(t, "output_tokens", 0),
+                "total_tokens": getattr(t, "total_tokens", 0),
+                "balance_after": getattr(t, "balance_after", None),
+            }
+
+        payload = {
+            "token_usage": token_usage,
+            "transactions": [_tx_to_dict(t) for t in transactions],
+            "aggregates": aggregates,
+        }
+
+        filepath.write_text(json.dumps(payload, indent=2, default=str))
+        self._created_files.append(str(filepath))
+        self._maybe_index(filepath)
         return filepath
     
     def write_summary_report(self, content: str) -> Path:
@@ -245,6 +317,7 @@ class ProjectWriter:
         
         filepath.write_text(full_content)
         self._created_files.append(str(filepath))
+        self._maybe_index(filepath)
         return filepath
     
     def append_to_file(self, relative_path: str, content: str) -> Path:
@@ -258,6 +331,9 @@ class ProjectWriter:
         
         existing = filepath.read_text() if filepath.exists() else ""
         filepath.write_text(existing + content)
+
+        self._created_files.append(str(filepath))
+        self._maybe_index(filepath)
         
         return filepath
     

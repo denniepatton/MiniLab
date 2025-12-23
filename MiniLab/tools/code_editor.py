@@ -13,6 +13,7 @@ from typing import Any, Optional
 from pydantic import Field
 
 from .base import Tool, ToolInput, ToolOutput, ToolError
+from ..context import ContextManager
 from ..security import PathGuard, AccessDenied
 from ..utils import console
 
@@ -96,10 +97,63 @@ class CodeEditorTool(Tool):
     name = "code_editor"
     description = "Create, edit, and run code files (writing restricted to Sandbox/)"
     
-    def __init__(self, agent_id: str, workspace_root: Path, **kwargs):
+    def __init__(
+        self,
+        agent_id: str,
+        workspace_root: Path,
+        context_manager: Optional[ContextManager] = None,
+        auto_index: bool = True,
+        max_index_bytes: int = 2_000_000,
+        **kwargs,
+    ):
         super().__init__(agent_id, **kwargs)
         self.workspace_root = workspace_root
         self.path_guard = PathGuard.get_instance()
+        self.context_manager = context_manager
+        self.auto_index = auto_index
+        self.max_index_bytes = max_index_bytes
+
+    def _infer_project_name(self, path: Path) -> Optional[str]:
+        try:
+            rel = path.relative_to(self.workspace_root)
+        except ValueError:
+            return None
+        parts = rel.parts
+        if len(parts) >= 2 and parts[0] == "Sandbox":
+            return parts[1]
+        return None
+
+    def _should_index(self, path: Path) -> bool:
+        if not self.auto_index or not self.context_manager:
+            return False
+        if not path.exists() or not path.is_file():
+            return False
+        try:
+            rel = path.relative_to(self.workspace_root)
+        except ValueError:
+            return False
+        if not rel.parts or rel.parts[0] != "Sandbox":
+            return False
+        if any(part.startswith(".") for part in rel.parts):
+            return False
+        try:
+            if path.stat().st_size > self.max_index_bytes:
+                return False
+        except Exception:
+            return False
+        ext = path.suffix.lower()
+        return ext in {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".csv"} or ext == ""
+
+    def _maybe_index(self, path: Path) -> None:
+        if not self._should_index(path):
+            return
+        project_name = self._infer_project_name(path)
+        if not project_name:
+            return
+        try:
+            self.context_manager.index_file(project_name=project_name, file_path=path)
+        except Exception:
+            pass
     
     def get_actions(self) -> dict[str, str]:
         return {
@@ -170,6 +224,8 @@ class CodeEditorTool(Tool):
         
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(params.content)
+
+        self._maybe_index(path)
         
         lines = params.content.count("\n") + 1
         console.file_write(params.path)
@@ -225,6 +281,8 @@ class CodeEditorTool(Tool):
         
         lines[insert_idx:insert_idx] = new_lines
         path.write_text("".join(lines))
+
+        self._maybe_index(path)
         
         return CodeOutput(
             success=True,
@@ -252,6 +310,8 @@ class CodeEditorTool(Tool):
         
         lines[start_idx:end_idx] = new_lines
         path.write_text("".join(lines))
+
+        self._maybe_index(path)
         
         return CodeOutput(
             success=True,
@@ -275,6 +335,8 @@ class CodeEditorTool(Tool):
         
         del lines[start_idx:end_idx]
         path.write_text("".join(lines))
+
+        self._maybe_index(path)
         
         return CodeOutput(
             success=True,
@@ -300,6 +362,8 @@ class CodeEditorTool(Tool):
         
         replacements = content.count(params.find) if params.count == -1 else min(content.count(params.find), params.count)
         path.write_text(new_content)
+
+        self._maybe_index(path)
         
         return CodeOutput(
             success=True,

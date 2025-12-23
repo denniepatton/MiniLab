@@ -1,0 +1,131 @@
+# Unified MiniLab team configuration (single source of truth)
+#
+# Goals:
+# - Maximum agent autonomy (guidelines, not rules)
+# - Minimal hard-coded policy in Python
+# - One file controls: team members, tools, write permissions, and security capabilities
+#
+# NOTE: This config is enforced by ToolFactory + PathGuard.
+
+agents:
+  bohr:
+    display_name: "Bohr"
+    guild: "synthesis"
+    role: "Project Manager"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, user_input, web_search, pubmed, arxiv, citation, environment]
+    write_tools: []
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: ["*"]
+      can_execute_shell: false
+      can_modify_environment: true
+
+  gould:
+    display_name: "Gould"
+    guild: "synthesis"
+    role: "Librarian Writer"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, user_input, web_search, pubmed, arxiv, citation]
+    write_tools: [filesystem, citation]
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: [".md", ".txt", ".bib", ".json", ".yaml", ".yml"]
+      can_execute_shell: false
+      can_modify_environment: false
+
+  farber:
+    display_name: "Farber"
+    guild: "synthesis"
+    role: "Clinician Critic"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, user_input, web_search, pubmed, citation]
+    write_tools: [filesystem]
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: [".md", ".txt", ".json"]
+      can_execute_shell: false
+      can_modify_environment: false
+
+  feynman:
+    display_name: "Feynman"
+    guild: "theory"
+    role: "Curious Physicist"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, user_input, web_search, pubmed, arxiv]
+    write_tools: [filesystem]
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: [".md", ".txt", ".json"]
+      can_execute_shell: false
+      can_modify_environment: false
+
+  shannon:
+    display_name: "Shannon"
+    guild: "theory"
+    role: "Information Theorist"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, user_input, web_search, arxiv]
+    write_tools: [filesystem]
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: [".md", ".txt", ".json"]
+      can_execute_shell: false
+      can_modify_environment: false
+
+  greider:
+    display_name: "Greider"
+    guild: "theory"
+    role: "Molecular Biologist"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, user_input, web_search, pubmed]
+    write_tools: [filesystem]
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: [".md", ".txt", ".json"]
+      can_execute_shell: false
+      can_modify_environment: false
+
+  dayhoff:
+    display_name: "Dayhoff"
+    guild: "implementation"
+    role: "Expert Bioinformatician"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, user_input, web_search, pubmed]
+    write_tools: [filesystem]
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: [".md", ".txt", ".json", ".yaml", ".yml", ".sh"]
+      can_execute_shell: false
+      can_modify_environment: false
+
+  hinton:
+    display_name: "Hinton"
+    guild: "implementation"
+    role: "CS Engineer"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, code_editor, terminal, user_input, environment]
+    write_tools: [filesystem, code_editor, terminal]
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: ["*"]
+      can_execute_shell: true
+      can_modify_environment: false
+
+  bayes:
+    display_name: "Bayes"
+    guild: "implementation"
+    role: "Bayesian Statistician"
+    backend: "anthropic:claude-sonnet-4-5"
+    tools: [filesystem, code_editor, terminal, user_input]
+    write_tools: [filesystem, code_editor, terminal]
+    security:
+      writable_subdirs: ["*"]
+      writable_extensions: [".py", ".r", ".R", ".md", ".txt", ".json", ".csv"]
+      can_execute_shell: true
+      can_modify_environment: false
+
+triads:
+  synthesis_core: [bohr, farber, gould]
+  theory_core: [feynman, shannon, greider]
+  implementation_core: [bayes, hinton, dayhoff]

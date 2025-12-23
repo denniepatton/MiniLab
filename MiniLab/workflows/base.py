@@ -310,14 +310,22 @@ class WorkflowModule(ABC):
         """
         Initialize budget tracking for this workflow.
         
-        Called at start of execute() to set up budget awareness.
+        Uses the centralized BudgetManager for dynamic allocation.
         """
         try:
             from ..core import get_token_account
+            from ..config.budget_manager import get_budget_manager
+            
             account = get_token_account()
             self._workflow_start_tokens = account.total_used
             
-            if session_budget:
+            # Get budget from centralized manager
+            budget_mgr = get_budget_manager()
+            wb = budget_mgr.get_workflow_budget(self.name)
+            if wb:
+                self._workflow_budget = wb.allocated_tokens
+            elif session_budget:
+                # Fallback to percentage-based allocation
                 allocation = self.BUDGET_ALLOCATION.get(self.name, 0.15)
                 self._workflow_budget = int(session_budget * allocation)
         except ImportError:
@@ -348,12 +356,152 @@ class WorkflowModule(ABC):
         """
         Get budget guidance message for agents.
         
-        Returns string to include in agent prompts when budget is constrained.
+        Returns guidance text based on current budget status.
+        Agents receive this information but decide how to act on it.
         """
+        try:
+            from ..config.budget_manager import get_budget_manager
+            budget_mgr = get_budget_manager()
+            return budget_mgr.get_workflow_guidance(self.name)
+        except ImportError:
+            pass
+        
+        # Fallback to simple percentage-based guidance
         within_budget, pct = self._check_workflow_budget()
         
         if pct >= 80:
-            return f"\n⚠️ BUDGET ALERT: This workflow has used {pct:.0f}% of its allocation. Be CONCISE. Skip optional steps. Prioritize core deliverables.\n"
+            return f"\n⚠️ BUDGET: {pct:.0f}% of workflow allocation used. Prioritize core deliverables.\n"
         elif pct >= 60:
-            return f"\n📊 Budget note: {pct:.0f}% of workflow allocation used. Be efficient in remaining steps.\n"
+            return f"\n📊 Budget: {pct:.0f}% of workflow allocation used.\n"
         return ""
+    
+    def _record_workflow_usage(self) -> None:
+        """Record final token usage for this workflow to the budget manager."""
+        try:
+            from ..core import get_token_account
+            from ..config.budget_manager import get_budget_manager
+            
+            account = get_token_account()
+            workflow_used = account.total_used - self._workflow_start_tokens
+            
+            budget_mgr = get_budget_manager()
+            budget_mgr.record_usage(self.name, workflow_used)
+        except ImportError:
+            pass
+    
+    async def execute_autonomous(
+        self,
+        inputs: dict[str, Any],
+        lead_agent: str,
+        objective: str,
+        supporting_context: Optional[str] = None,
+    ) -> WorkflowResult:
+        """
+        Execute workflow in autonomous mode - agent decides approach.
+        
+        Unlike structured execute(), this gives the lead agent full control
+        to decide how to accomplish the objective. The agent can:
+        - Skip, combine, or reorder steps as it sees fit
+        - Consult colleagues when it decides to
+        - Allocate its own time/tokens within budget
+        - Decide when the task is complete
+        
+        This is the PREFERRED execution mode for maximum flexibility.
+        
+        Args:
+            inputs: Workflow inputs (data paths, prior results, etc.)
+            lead_agent: Agent who takes ownership of the workflow
+            objective: High-level objective (what, not how)
+            supporting_context: Additional context from prior workflows
+            
+        Returns:
+            WorkflowResult with outputs determined by the agent
+        """
+        if lead_agent not in self.agents:
+            return WorkflowResult(
+                status=WorkflowStatus.FAILED,
+                error=f"Lead agent '{lead_agent}' not available",
+            )
+        
+        self._status = WorkflowStatus.IN_PROGRESS
+        self._init_budget_tracking()
+        self._log_step(f"Starting autonomous execution with {lead_agent}")
+        
+        # Build autonomous task prompt
+        budget_guidance = self._get_budget_guidance()
+        
+        task_prompt = f"""## Autonomous Workflow Execution
+
+You are the lead agent for the **{self.name}** workflow phase.
+
+### Your Objective
+{objective}
+
+### Available Context
+{supporting_context or 'No prior context provided.'}
+
+### Available Inputs
+```json
+{json.dumps(inputs, indent=2, default=str)}
+```
+
+### Your Authority
+As lead agent, you have FULL AUTONOMY to decide:
+- How to approach this objective
+- Which steps to take and in what order
+- When to consult colleagues (you can call them directly)
+- When to use tools vs. reason independently
+- When the objective is sufficiently achieved
+
+### Project Location
+All outputs should go to: {self.project_path}
+
+### Budget Context
+{budget_guidance}
+
+### Expected Deliverables
+This workflow typically produces: {', '.join(self.expected_outputs) or 'results relevant to objective'}
+
+### Execution Guidelines
+1. Assess the objective and plan your approach
+2. Execute your plan, adapting as you learn
+3. Use tools to create real artifacts (code, reports, data)
+4. Consult colleagues when their expertise adds value
+5. Wrap up when you've achieved the objective or hit budget limits
+
+Begin your work now. When complete, summarize your deliverables."""
+        
+        try:
+            agent = self.agents[lead_agent]
+            
+            result = await agent.execute(
+                task=task_prompt,
+                project_name=self.project_path.name,
+            )
+            
+            self._record_workflow_usage()
+            
+            # Extract artifacts from agent's outputs
+            artifacts = result.outputs if hasattr(result, 'outputs') else []
+            
+            if result.status.value == "completed":
+                return WorkflowResult(
+                    status=WorkflowStatus.COMPLETED,
+                    outputs={"agent_result": result.result},
+                    artifacts=artifacts,
+                    summary=result.result or "Workflow completed",
+                )
+            else:
+                return WorkflowResult(
+                    status=WorkflowStatus.FAILED,
+                    error=result.error or "Autonomous execution did not complete",
+                    summary=result.result or "",
+                )
+        
+        except Exception as e:
+            self._record_workflow_usage()
+            self._log_step(f"Error in autonomous execution: {e}")
+            return WorkflowResult(
+                status=WorkflowStatus.FAILED,
+                error=str(e),
+            )

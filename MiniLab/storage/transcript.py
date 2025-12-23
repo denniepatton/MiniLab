@@ -27,6 +27,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import json
 
 
 class TranscriptLogger:
@@ -60,6 +61,9 @@ class TranscriptLogger:
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
         self.token_budget: Optional[int] = None
+
+        # Optional JSONL event stream for queryable observability
+        self._events_jsonl_path: Optional[Path] = None
     
     def start_session(self, conversation_name: str, token_budget: Optional[int] = None) -> None:
         """Start a new conversation session."""
@@ -69,6 +73,11 @@ class TranscriptLogger:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.token_budget = token_budget
+
+        # Initialize JSONL event stream path
+        timestamp = self.start_time.strftime("%Y-%m-%d_%H%M")
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in conversation_name)
+        self._events_jsonl_path = self.transcripts_dir / f"{timestamp}_{safe_name}.events.jsonl"
         
         # Opening entry
         self._add_event("session_start", {
@@ -123,7 +132,6 @@ class TranscriptLogger:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "is_reasoning": is_reasoning,
-<<<<<<< Updated upstream
         })
     
     def log_agent_reasoning(
@@ -141,25 +149,6 @@ class TranscriptLogger:
             "tokens": tokens,
         })
     
-=======
-        })
-    
-    def log_agent_reasoning(
-        self,
-        agent_name: str,
-        reasoning: str,
-        tokens: int = 0,
-    ) -> None:
-        """Log agent's reasoning/thinking process."""
-        self.total_output_tokens += tokens
-        
-        self._add_event("agent_reasoning", {
-            "agent": agent_name.upper(),
-            "reasoning": reasoning,
-            "tokens": tokens,
-        })
-    
->>>>>>> Stashed changes
     # ========== Agent Consultations ==========
     
     def log_consultation_start(
@@ -358,11 +347,20 @@ class TranscriptLogger:
     
     def _add_event(self, event_type: str, data: Dict[str, Any]) -> None:
         """Add an event to the transcript."""
-        self.events.append({
+        event = {
             "timestamp": datetime.now().isoformat(),
             "type": event_type,
             **data,
-        })
+        }
+        self.events.append(event)
+
+        # Append to JSONL for queryable observability
+        if self._events_jsonl_path:
+            try:
+                with open(self._events_jsonl_path, "a") as f:
+                    f.write(json.dumps(event, default=str) + "\n")
+            except Exception:
+                pass
     
     # ========== Output ==========
     
@@ -403,22 +401,14 @@ class TranscriptLogger:
         lines.append("")
         
         # Token summary - query TokenAccount for authoritative data
-<<<<<<< Updated upstream
-=======
         lines.append("## Resource Usage")
         lines.append("")
         
->>>>>>> Stashed changes
         try:
             from ..core import get_token_account
             account = get_token_account()
             summary = account.usage_summary
             
-<<<<<<< Updated upstream
-            lines.append("## Resource Usage")
-            lines.append("")
-=======
->>>>>>> Stashed changes
             lines.append(f"- **Input Tokens:** {summary['total_input']:,}")
             lines.append(f"- **Output Tokens:** {summary['total_output']:,}")
             lines.append(f"- **Total Tokens:** {summary['total_used']:,}")
@@ -426,14 +416,6 @@ class TranscriptLogger:
                 lines.append(f"- **Budget:** {summary['budget']:,} ({summary['percentage_used']:.1f}% used)")
             lines.append(f"- **Estimated Cost:** ${summary['estimated_cost']:.2f}")
             
-<<<<<<< Updated upstream
-            # Per-agent breakdown if available
-            if account._agent_usage:
-                lines.append("")
-                lines.append("### Per-Agent Usage")
-                lines.append("")
-                for agent_id in sorted(account._agent_usage.keys()):
-=======
             # Per-agent breakdown from transactions
             agent_ids = set(t.agent_id for t in account._transactions)
             if agent_ids:
@@ -441,17 +423,11 @@ class TranscriptLogger:
                 lines.append("### Per-Agent Usage")
                 lines.append("")
                 for agent_id in sorted(agent_ids):
->>>>>>> Stashed changes
                     agent_data = account.get_agent_usage(agent_id)
                     lines.append(f"- **{agent_id.upper()}:** {agent_data['total_tokens']:,} tokens ({agent_data['call_count']} calls)")
         except Exception:
             # Fallback to local tracking if TokenAccount not available
             total = self.total_input_tokens + self.total_output_tokens
-<<<<<<< Updated upstream
-            lines.append("## Resource Usage")
-            lines.append("")
-=======
->>>>>>> Stashed changes
             lines.append(f"- **Input Tokens:** {self.total_input_tokens:,}")
             lines.append(f"- **Output Tokens:** {self.total_output_tokens:,}")
             lines.append(f"- **Total Tokens:** {total:,}")
@@ -478,7 +454,6 @@ class TranscriptLogger:
         lines.append("*End of Transcript*")
         
         return "\n".join(lines)
-<<<<<<< Updated upstream
     
     def _format_event(self, event: Dict[str, Any]) -> List[str]:
         """Format a single event as Markdown."""
@@ -583,112 +558,6 @@ class TranscriptLogger:
         
         return lines
     
-=======
-    
-    def _format_event(self, event: Dict[str, Any]) -> List[str]:
-        """Format a single event as Markdown."""
-        lines = []
-        ts = event["timestamp"].split("T")[1][:8]  # HH:MM:SS
-        event_type = event["type"]
-        
-        if event_type == "session_start":
-            lines.append(f"### Session Started")
-            lines.append(f"*{event.get('date', '')} at {event.get('time', '')}*")
-        
-        elif event_type == "user_message":
-            lines.append(f"### [{ts}] USER")
-            lines.append("")
-            lines.append(event.get("content", ""))
-        
-        elif event_type == "user_response":
-            lines.append(f"**[{ts}] User Response:**")
-            lines.append(f"> {event.get('response', '')}")
-        
-        elif event_type == "agent_message":
-            agent = event.get("agent", "AGENT")
-            tokens = event.get("input_tokens", 0) + event.get("output_tokens", 0)
-            token_str = f" ({tokens:,} tokens)" if tokens else ""
-            
-            lines.append(f"### [{ts}] {agent}{token_str}")
-            lines.append("")
-            lines.append(event.get("content", ""))
-        
-        elif event_type == "agent_reasoning":
-            agent = event.get("agent", "AGENT")
-            lines.append(f"**[{ts}] {agent} (reasoning):**")
-            lines.append("")
-            lines.append(f"*{event.get('reasoning', '')}*")
-        
-        elif event_type == "consultation_start":
-            lines.append(f"**[{ts}] Consultation: {event.get('from', '')} → {event.get('to', '')}**")
-            lines.append("")
-            lines.append(f"**Question:** {event.get('question', '')}")
-        
-        elif event_type == "consultation_response":
-            tokens = event.get("input_tokens", 0) + event.get("output_tokens", 0)
-            token_str = f" ({tokens:,} tokens)" if tokens else ""
-            lines.append(f"**[{ts}] Response from {event.get('from', '')}{token_str}:**")
-            lines.append("")
-            lines.append(event.get("response", ""))
-        
-        elif event_type == "tool_use":
-            agent = event.get("agent", "")
-            tool = event.get("tool", "")
-            action = event.get("action", "")
-            params = event.get("params", "")
-            success = "✓" if event.get("success") else "✗"
-            
-            lines.append(f"**[{ts}] {agent}** used `{tool}.{action}` {success}")
-            if params:
-                lines.append(f"> {params}")
-            if event.get("result"):
-                lines.append(f"> Result: {event.get('result')}")
-            if event.get("error"):
-                lines.append(f"> Error: {event.get('error')}")
-        
-        elif event_type == "workflow_start":
-            workflow = event.get("workflow", "").replace("_", " ").title()
-            phase = event.get("phase", "")
-            lines.append(f"### [{ts}] Workflow: {workflow}")
-            if phase:
-                lines.append(f"*{phase}*")
-        
-        elif event_type == "workflow_complete":
-            workflow = event.get("workflow", "").replace("_", " ").title()
-            lines.append(f"**[{ts}] ✓ {workflow} completed**")
-            if event.get("summary"):
-                lines.append(f"> {event.get('summary')}")
-        
-        elif event_type == "workflow_failed":
-            workflow = event.get("workflow", "").replace("_", " ").title()
-            lines.append(f"**[{ts}] ✗ {workflow} failed**")
-            lines.append(f"> Error: {event.get('error', '')}")
-        
-        elif event_type == "stage_transition":
-            lines.append(f"---")
-            lines.append(f"**[{ts}] Stage: {event.get('stage', '')}**")
-            lines.append(f"*{event.get('description', '')}*")
-        
-        elif event_type == "budget_update":
-            pct = event.get("percentage", 0)
-            used = event.get("used", 0)
-            budget = event.get("budget", 0)
-            lines.append(f"*[{ts}] Budget: {used:,}/{budget:,} tokens ({pct:.1f}% used)*")
-        
-        elif event_type == "budget_warning":
-            lines.append(f"**[{ts}] ⚠ Budget Warning ({event.get('percentage', 0):.0f}%)**")
-            lines.append(f"> {event.get('message', '')}")
-        
-        elif event_type == "budget_set":
-            lines.append(f"*[{ts}] Token budget set: {event.get('budget', 0):,}*")
-        
-        elif event_type == "system":
-            event_subtype = event.get("event_type", "info")
-            lines.append(f"*[{ts}] [{event_subtype}] {event.get('message', '')}*")
-        
-        return lines
-    
->>>>>>> Stashed changes
     def get_summary(self) -> Dict[str, Any]:
         """Get session summary for programmatic use."""
         total = self.total_input_tokens + self.total_output_tokens

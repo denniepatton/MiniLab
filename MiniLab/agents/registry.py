@@ -21,14 +21,15 @@ from ..context import ContextManager
 from ..tools.tool_factory import ToolFactory
 from .base import Agent
 from .prompts import PromptBuilder
+from ..config.team_loader import get_team_config
 
 
-# Guild definitions
-GUILDS = {
-    "synthesis": ["bohr", "gould", "farber"],
-    "theory": ["feynman", "shannon", "greider"],
-    "implementation": ["dayhoff", "hinton", "bayes"],
-}
+def _default_guilds() -> dict[str, list[str]]:
+    return {
+        "synthesis": ["bohr", "gould", "farber"],
+        "theory": ["feynman", "shannon", "greider"],
+        "implementation": ["dayhoff", "hinton", "bayes"],
+    }
 
 # Default LLM model
 DEFAULT_MODEL = "claude-sonnet-4-5"
@@ -72,6 +73,12 @@ class AgentRegistry:
         
         self._agents: dict[str, Agent] = {}
         self._llm_backends: dict[str, Any] = {}
+
+        # Team config (single source of truth)
+        try:
+            self.team_config = get_team_config()
+        except Exception:
+            self.team_config = None
     
     def _create_llm_backend(self, model: str, agent_id: str = "unknown") -> Any:
         """Create LLM backend for a model string."""
@@ -128,7 +135,15 @@ class AgentRegistry:
         if agent_id in self._agents:
             return self._agents[agent_id]
         
-        model = model or self.default_model
+        # Prefer team.yaml backend unless an explicit override is provided.
+        if model:
+            selected_model = model
+        else:
+            selected_model = self.default_model
+            if self.team_config:
+                cfg = self.team_config.get_agent(agent_id)
+                if cfg and cfg.backend:
+                    selected_model = cfg.backend
         
         # Get structured prompt
         prompts = PromptBuilder.build_all_prompts()
@@ -153,14 +168,19 @@ class AgentRegistry:
         )
         
         # Create LLM backend with agent_id for token tracking
-        llm = self._create_llm_backend(model, agent_id=agent_id)
+        llm = self._create_llm_backend(selected_model, agent_id=agent_id)
         
         # Determine guild
         guild = None
-        for g, members in GUILDS.items():
-            if agent_id in members:
-                guild = g
-                break
+        if self.team_config:
+            cfg = self.team_config.get_agent(agent_id)
+            if cfg:
+                guild = cfg.guild
+        if not guild:
+            for g, members in _default_guilds().items():
+                if agent_id in members:
+                    guild = g
+                    break
         
         # Create agent
         agent = Agent(
@@ -196,9 +216,12 @@ class AgentRegistry:
         Returns:
             Dict mapping agent_id to Agent
         """
-        all_agent_ids = []
-        for members in GUILDS.values():
-            all_agent_ids.extend(members)
+        if self.team_config:
+            all_agent_ids = self.team_config.get_agent_ids()
+        else:
+            all_agent_ids = []
+            for members in _default_guilds().values():
+                all_agent_ids.extend(members)
         
         for agent_id in all_agent_ids:
             self.create_agent(agent_id, model)
@@ -223,7 +246,10 @@ class AgentRegistry:
     
     def get_guild_agents(self, guild: str) -> dict[str, Agent]:
         """Get all agents in a guild."""
-        guild_members = GUILDS.get(guild, [])
+        if self.team_config:
+            guild_members = [aid for aid, cfg in self.team_config.get_all_agents().items() if cfg.guild == guild.lower()]
+        else:
+            guild_members = _default_guilds().get(guild, [])
         return {
             aid: self._agents[aid]
             for aid in guild_members
@@ -269,6 +295,7 @@ def create_agents(
         workspace_root=workspace_root,
         input_callback=input_callback,
         permission_callback=permission_callback,
+        context_manager=context_manager,
     )
     
     # Create registry and agents

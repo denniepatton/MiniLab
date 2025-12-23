@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import httpx
 
@@ -157,12 +158,15 @@ class AnthropicBackend(LLMBackend):
         # Update global TokenAccount
         try:
             from ..core import get_token_account
+            from ..core.token_context import get_workflow, get_trigger
             account = get_token_account()
             account.debit(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 agent_id=self.agent_id,
                 operation=operation,
+                workflow=get_workflow(),
+                trigger=get_trigger(),
                 cache_creation=cache_creation,
                 cache_read=cache_read,
             )
@@ -291,6 +295,169 @@ class AnthropicBackend(LLMBackend):
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 5
                     print(f"\n  Connection error. Retrying in {wait_time}s (attempt {attempt + 2}/{max_retries})...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+        
+        raise last_error
+
+    async def acomplete_streaming(
+        self,
+        messages: List[ChatMessage],
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+        max_retries: int = 3,
+        use_cache: bool = True,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> str:
+        """
+        Streaming completion - yields text chunks as they arrive.
+        
+        Args:
+            messages: Chat messages
+            temperature: Sampling temperature
+            max_tokens: Max response tokens
+            max_retries: Retry count
+            use_cache: Enable prompt caching
+            on_chunk: Optional callback called with each text chunk
+            
+        Returns:
+            Complete response text (all chunks concatenated)
+        """
+        start_time = time.perf_counter()
+        
+        # Extract system messages
+        system_content = None
+        anthropic_messages = []
+        
+        for msg in messages:
+            if msg["role"] == "system":
+                if system_content is None:
+                    system_content = msg["content"]
+                else:
+                    system_content += "\n\n" + msg["content"]
+            else:
+                anthropic_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+
+        payload = {
+            "model": self.model,
+            "messages": anthropic_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens or 4096,
+            "stream": True,  # Enable streaming
+        }
+        
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        
+        if system_content:
+            if use_cache:
+                headers["anthropic-beta"] = "prompt-caching-2024-07-31"
+                payload["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            else:
+                payload["system"] = system_content
+
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                full_response = []
+                usage_data = {}
+                
+                async with self._client.stream(
+                    "POST",
+                    "/messages",
+                    json=payload,
+                    headers=headers,
+                ) as resp:
+                    if resp.status_code != 200:
+                        error_text = await resp.aread()
+                        try:
+                            error_data = json.loads(error_text)
+                            error_msg = error_data.get("error", {}).get("message", str(error_data))
+                        except Exception:
+                            error_msg = error_text[:500].decode() if isinstance(error_text, bytes) else str(error_text)[:500]
+                        
+                        print(f"\n  Streaming API Error ({resp.status_code}): {error_msg}\n")
+                        
+                        if resp.status_code >= 500 or resp.status_code == 429:
+                            if attempt < max_retries - 1:
+                                wait_time = (attempt + 1) * 5
+                                print(f"  Retrying in {wait_time}s...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                        resp.raise_for_status()
+                    
+                    # Process SSE stream
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        
+                        data_str = line[6:]  # Remove "data: " prefix
+                        if data_str == "[DONE]":
+                            break
+                            
+                        try:
+                            event = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        
+                        event_type = event.get("type")
+                        
+                        if event_type == "content_block_delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                text = delta.get("text", "")
+                                if text:
+                                    full_response.append(text)
+                                    if on_chunk:
+                                        on_chunk(text)
+                        
+                        elif event_type == "message_delta":
+                            # Final usage stats
+                            if "usage" in event:
+                                usage_data.update(event["usage"])
+                        
+                        elif event_type == "message_start":
+                            # Initial usage (input tokens)
+                            if "message" in event and "usage" in event["message"]:
+                                usage_data.update(event["message"]["usage"])
+                
+                result = "".join(full_response)
+                
+                # Update token usage if available
+                if usage_data:
+                    self._update_token_usage(usage_data)
+                
+                # Record timing
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                timing().record("acomplete_streaming", "llm", duration_ms, model=self.model)
+                
+                return result
+                
+            except httpx.ReadTimeout as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10
+                    print(f"\n  Stream timed out. Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+            except httpx.ConnectError as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5
+                    print(f"\n  Connection error. Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     raise

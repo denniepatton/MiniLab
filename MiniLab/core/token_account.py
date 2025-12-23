@@ -37,6 +37,8 @@ class TokenTransaction:
     output_tokens: int
     total_tokens: int
     balance_after: int
+    workflow: Optional[str] = None
+    trigger: Optional[str] = None
     operation: str = ""  # e.g., "pubmed.search", "llm.complete"
 
 
@@ -171,6 +173,8 @@ class TokenAccount:
         output_tokens: int,
         agent_id: str = "unknown",
         operation: str = "",
+        workflow: Optional[str] = None,
+        trigger: Optional[str] = None,
         cache_creation: int = 0,
         cache_read: int = 0,
     ) -> TokenTransaction:
@@ -201,6 +205,8 @@ class TokenAccount:
         transaction = TokenTransaction(
             timestamp=datetime.now(),
             agent_id=agent_id,
+            workflow=workflow,
+            trigger=trigger,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total,
@@ -259,6 +265,40 @@ class TokenAccount:
             "total_tokens": input_total + output_total,
             "call_count": len([t for t in self._transactions if t.agent_id == agent_id]),
         }
+
+    def iter_transactions(self) -> list[TokenTransaction]:
+        """Return a copy of all transactions (authoritative accounting)."""
+        return list(self._transactions)
+
+    def aggregate(
+        self,
+        keys: tuple[str, ...] = ("workflow", "agent_id", "operation", "trigger"),
+    ) -> list[dict[str, Any]]:
+        """Aggregate token usage by selected fields.
+
+        Keys may include: workflow, agent_id, operation, trigger.
+        """
+        allowed = {"workflow", "agent_id", "operation", "trigger"}
+        for k in keys:
+            if k not in allowed:
+                raise ValueError(f"Unsupported aggregation key: {k}")
+
+        buckets: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for t in self._transactions:
+            bucket_key = tuple(getattr(t, k) for k in keys)
+            b = buckets.get(bucket_key)
+            if b is None:
+                b = {k: getattr(t, k) for k in keys}
+                b.update({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "call_count": 0})
+                buckets[bucket_key] = b
+            b["input_tokens"] += t.input_tokens
+            b["output_tokens"] += t.output_tokens
+            b["total_tokens"] += t.total_tokens
+            b["call_count"] += 1
+
+        rows = list(buckets.values())
+        rows.sort(key=lambda r: r.get("total_tokens", 0), reverse=True)
+        return rows
     
     def format_status(self) -> str:
         """Format a human-readable status string."""

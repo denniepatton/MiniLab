@@ -177,6 +177,9 @@ class BohrOrchestrator:
         llm_backend: Optional[AnthropicBackend] = None,
         user_callback: Optional[Callable[[str], str]] = None,
         transcripts_dir: Optional[Path] = None,
+        streaming_enabled: bool = False,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        autonomous_mode: bool = True,  # Enable agent-driven workflow execution by default
     ):
         """
         Initialize the Bohr orchestrator.
@@ -185,9 +188,26 @@ class BohrOrchestrator:
             llm_backend: LLM backend for agent communication
             user_callback: Function to get user input (for non-interactive)
             transcripts_dir: Directory for saving transcripts
+            streaming_enabled: Enable streaming output from agents
+            on_stream_chunk: Callback for streaming chunks (agent_id, text)
+            autonomous_mode: Enable agent-driven autonomous workflow execution
         """
         self.llm_backend = llm_backend or AnthropicBackend(model="claude-sonnet-4-5", agent_id="bohr")
         self.user_callback = user_callback or self._default_user_input
+        
+        # Streaming configuration
+        self.streaming_enabled = streaming_enabled
+        self.on_stream_chunk = on_stream_chunk
+        
+        # Autonomous mode - let agents drive workflow execution
+        # Can be overridden by MINILAB_AUTONOMOUS env var
+        env_autonomous = os.getenv("MINILAB_AUTONOMOUS", "").lower()
+        if env_autonomous == "false" or env_autonomous == "0":
+            self.autonomous_mode = False
+        elif env_autonomous == "true" or env_autonomous == "1":
+            self.autonomous_mode = True
+        else:
+            self.autonomous_mode = autonomous_mode
         
         # Set up transcript logger
         self.transcripts_dir = transcripts_dir or Path(__file__).parent.parent.parent / "Transcripts"
@@ -209,6 +229,36 @@ class BohrOrchestrator:
         self._exit_requested = False
         self._token_budget: Optional[int] = None
         self._tokens_used: int = 0
+
+    def _permission_callback(self, request: str) -> bool:
+        """Permission callback for tools (terminal/env). Defaults to interactive approval."""
+        # Allow non-interactive runs to auto-approve if explicitly configured.
+        auto = os.getenv("MINILAB_AUTO_APPROVE", "").strip().lower()
+        if auto in {"1", "true", "yes"}:
+            return True
+        if auto in {"0", "false", "no"}:
+            return False
+
+        try:
+            response = self.user_callback(
+                "Permission required for an operation:\n"
+                f"{request}\n\nApprove? (y/N)"
+            )
+            return response.strip().lower() in {"y", "yes"}
+        except Exception:
+            return False
+
+    def _infer_complexity(self, token_budget: Optional[int]) -> str:
+        """Infer a reasonable complexity tier when consultation doesn't specify one."""
+        if not token_budget:
+            return "moderate"
+        if token_budget < 200_000:
+            return "simple"
+        if token_budget < 700_000:
+            return "moderate"
+        if token_budget < 1_200_000:
+            return "complex"
+        return "exploratory"
     
     def _on_budget_warning(self, used: int, budget: int, percentage: float) -> None:
         """Callback when token budget warnings are triggered."""
@@ -268,10 +318,24 @@ class BohrOrchestrator:
         
         # Reset TokenAccount for new session
         self.token_account.reset()
+
+        # Start transcript as early as possible so project naming + consultation are captured.
+        # We'll update the session name once the project name is finalized.
+        provisional_name = f"pending_{self._session_date.strftime('%Y%m%d_%H%M%S')}"
+        self.transcript.start_session(provisional_name)
+        self.transcript.log_user_message(user_request)
+
+        # Reset BudgetManager singleton for new session
+        try:
+            from ..config.budget_manager import BudgetManager
+            BudgetManager.reset()
+        except Exception:
+            pass
         
         # Have Bohr generate and confirm project name
         if not project_name:
             project_name = await self._generate_project_name_interactive(user_request)
+        self.transcript.update_session_name(project_name)
         
         # Create project directory
         session_id = self._session_date.strftime("%Y%m%d_%H%M%S")
@@ -286,9 +350,7 @@ class BohrOrchestrator:
         )
         self.session.context["user_request"] = user_request
         
-        # Start transcript logging
-        self.transcript.start_session(project_name)
-        self.transcript.log_user_message(user_request)
+        # Transcript already started above (so naming prompts are included)
         
         # Initialize agents with context manager and tool factory
         # workspace_root should be the parent of Sandbox, not the project path
@@ -296,13 +358,15 @@ class BohrOrchestrator:
         self.agents, self.context_manager, self.tool_factory = create_agents(
             workspace_root=workspace_root,
             input_callback=self._user_input_callback,
-            permission_callback=None,
+            permission_callback=self._permission_callback,
             session_date=self._session_date,  # Pass session date to agents
         )
         
-        # Set transcript logger on all agents
+        # Set transcript logger on all agents and enable streaming if configured
         for agent in self.agents.values():
             agent.set_transcript(self.transcript)
+            if self.streaming_enabled:
+                agent.enable_streaming(on_chunk=self.on_stream_chunk)
         
         # Save initial session state (log internally, no console spam)
         self._log(f"Session started: {session_id}", console_print=False)
@@ -332,19 +396,25 @@ class BohrOrchestrator:
         # workspace_root should be the parent of Sandbox, not the project path
         workspace_root = self.SANDBOX_ROOT.parent
         
-        # Use session start time for date injection, or current time if not available
-        session_date = datetime.fromisoformat(self.session.start_time) if self.session.start_time else datetime.now()
+        # Use session started_at for date injection, or current time if not available
+        session_date = (
+            datetime.fromisoformat(self.session.started_at)
+            if getattr(self.session, "started_at", None)
+            else datetime.now()
+        )
         
         self.agents, self.context_manager, self.tool_factory = create_agents(
             workspace_root=workspace_root,
             input_callback=self._user_input_callback,
-            permission_callback=None,
+            permission_callback=self._permission_callback,
             session_date=session_date,
         )
         
-        # Set transcript logger on resumed agents
+        # Set transcript logger on resumed agents and enable streaming if configured
         for agent in self.agents.values():
             agent.set_transcript(self.transcript)
+            if self.streaming_enabled:
+                agent.enable_streaming(on_chunk=self.on_stream_chunk)
         
         self._log(f"Session resumed: {self.session.session_id}")
         
@@ -379,8 +449,20 @@ class BohrOrchestrator:
             self.transcript.log_stage_transition("consultation", "Starting Consultation Phase")
             self.session.current_workflow = "consultation"
             self.session.save()
-            
-            consultation_result = await self._execute_workflow("consultation")
+
+            from ..core.token_context import token_context
+
+            start_tokens = self.token_account.total_used
+            with token_context(workflow="consultation"):
+                consultation_result = await self._execute_workflow("consultation")
+            used_tokens = self.token_account.total_used - start_tokens
+
+            # Record truthful workflow usage into BudgetManager (if initialized)
+            try:
+                from ..config.budget_manager import get_budget_manager
+                get_budget_manager().record_usage("consultation", max(0, int(used_tokens)))
+            except Exception:
+                pass
             results["consultation"] = consultation_result
             self.session.workflow_results["consultation"] = consultation_result
             
@@ -397,6 +479,35 @@ class BohrOrchestrator:
                         self._token_budget = consultation_result.outputs["token_budget"]
                         self.token_account.set_budget(self._token_budget)
                         self.transcript.set_token_budget(self._token_budget)
+
+                        # Initialize dynamic workflow budgets
+                        try:
+                            from ..config.budget_manager import get_budget_manager
+
+                            complexity = (
+                                consultation_result.outputs.get("complexity")
+                                or consultation_result.outputs.get("project_complexity")
+                                or self._infer_complexity(self._token_budget)
+                            )
+                            budget_mgr = get_budget_manager()
+                            budget_mgr.initialize_session(total_budget=self._token_budget, complexity=str(complexity))
+
+                            # Mirror budget threshold events into transcript/logs
+                            def _on_threshold(threshold: int, level: str) -> None:
+                                try:
+                                    from ..utils import console
+                                    console.info(f"Budget threshold crossed: {threshold}% ({level})")
+                                except Exception:
+                                    pass
+                                try:
+                                    self.transcript.log_budget_warning(threshold, f"Budget threshold crossed: {threshold}% ({level})")
+                                except Exception:
+                                    pass
+
+                            budget_mgr.set_threshold_callback(_on_threshold)
+                        except Exception:
+                            pass
+
                         self._show_post_consultation_summary(consultation_result)
                     
                     # Set up user preferences for contextual autonomy
@@ -466,7 +577,25 @@ class BohrOrchestrator:
                     self.session.current_workflow = workflow_name
                     self.session.save()
                     
-                    result = await self._execute_workflow(workflow_name)
+                    # Use autonomous mode if enabled, with dynamic objective
+                    objective = next_action.get("objective") or next_action.get("reasoning")
+
+                    from ..core.token_context import token_context
+                    start_tokens = self.token_account.total_used
+                    with token_context(workflow=workflow_name):
+                        result = await self._execute_workflow(
+                            workflow_name,
+                            autonomous=self.autonomous_mode,
+                            objective=objective,
+                        )
+                    used_tokens = self.token_account.total_used - start_tokens
+
+                    # Record truthful workflow usage into BudgetManager (if initialized)
+                    try:
+                        from ..config.budget_manager import get_budget_manager
+                        get_budget_manager().record_usage(workflow_name, max(0, int(used_tokens)))
+                    except Exception:
+                        pass
                     results[workflow_name] = result
                     self.session.workflow_results[workflow_name] = result
                     
@@ -509,7 +638,9 @@ class BohrOrchestrator:
             
             # Final summary
             console.info("Generating final summary...")
-            final_summary = await self._create_final_summary()
+            from ..core.token_context import token_context
+            with token_context(workflow="final_summary"):
+                final_summary = await self._create_final_summary()
             results["final_summary"] = final_summary
             
             self.session.current_workflow = None
@@ -708,12 +839,19 @@ Valid TYPE_NAME values:
         except Exception:
             return "full_analysis"
     
-    async def _execute_workflow(self, workflow_name: str) -> WorkflowResult:
+    async def _execute_workflow(
+        self,
+        workflow_name: str,
+        autonomous: bool = False,
+        objective: Optional[str] = None,
+    ) -> WorkflowResult:
         """
         Execute a specific workflow module.
         
         Args:
             workflow_name: Name of workflow to execute
+            autonomous: If True, use autonomous execution mode (agent-driven)
+            objective: High-level objective for autonomous mode
             
         Returns:
             WorkflowResult from execution
@@ -735,7 +873,25 @@ Valid TYPE_NAME values:
         # Prepare inputs from session context
         inputs = self._prepare_workflow_inputs(workflow)
         
-        # Check for existing checkpoint
+        # Autonomous mode - let lead agent decide approach
+        if autonomous:
+            lead_agent = workflow.primary_agents[0] if workflow.primary_agents else "darwin"
+            
+            # Build context from prior workflow results
+            supporting_context = self._build_supporting_context()
+            
+            # Use provided objective or generate from workflow description
+            exec_objective = objective or f"Complete the {workflow_name} phase: {workflow.description}"
+            
+            result = await workflow.execute_autonomous(
+                inputs=inputs,
+                lead_agent=lead_agent,
+                objective=exec_objective,
+                supporting_context=supporting_context,
+            )
+            return result
+        
+        # Standard mode - structured execution with checkpoint support
         checkpoint_path = self.session.project_path / "checkpoints" / f"{workflow_name}_checkpoint.json"
         checkpoint = None
         if checkpoint_path.exists():
@@ -749,6 +905,31 @@ Valid TYPE_NAME values:
         result = await workflow.execute(inputs=inputs, checkpoint=checkpoint)
         
         return result
+    
+    def _build_supporting_context(self) -> str:
+        """Build context string from completed workflows for autonomous execution."""
+        context_parts = []
+        
+        for wf_name, wf_result in self.session.workflow_results.items():
+            if wf_result.status == WorkflowStatus.COMPLETED:
+                context_parts.append(f"## {wf_name.replace('_', ' ').title()} Results")
+                context_parts.append(wf_result.summary or "Completed successfully")
+                if wf_result.artifacts:
+                    context_parts.append(f"Artifacts: {', '.join(wf_result.artifacts)}")
+                context_parts.append("")
+        
+        # Add key session context
+        if self.session.context.get("project_spec"):
+            context_parts.append("## Project Specification")
+            context_parts.append(self.session.context["project_spec"][:2000])
+            context_parts.append("")
+        
+        if self.session.context.get("analysis_plan"):
+            context_parts.append("## Analysis Plan")
+            context_parts.append(self.session.context["analysis_plan"][:2000])
+            context_parts.append("")
+        
+        return "\n".join(context_parts) if context_parts else ""
     
     def _prepare_workflow_inputs(self, workflow: WorkflowModule) -> dict[str, Any]:
         """
@@ -946,23 +1127,32 @@ This summary will be presented to the user.""",
         )
         
         summary = summary_result.get("response", self._simple_summary())
-        
-        # Get token usage for the summary
-        token_usage = {}
-        if hasattr(self.llm_backend, 'token_usage'):
-            usage = self.llm_backend.token_usage
-            token_usage = {
-                "total_used": usage.get("total_tokens", 0),
-                "budget": self._token_budget,
-                "percentage_used": (usage.get("total_tokens", 0) / self._token_budget * 100) if self._token_budget else 0,
-                "estimated_cost": (usage.get("total_tokens", 0) / 1_000_000) * 5.00,
-            }
+
+        # Authoritative token usage + breakdown from TokenAccount
+        usage = self.token_account.usage_summary
+        token_usage = {
+            "total_used": usage.get("total_used", 0),
+            "total_input": usage.get("total_input", 0),
+            "total_output": usage.get("total_output", 0),
+            "budget": usage.get("budget"),
+            "percentage_used": usage.get("percentage_used", 0),
+            "remaining": usage.get("remaining"),
+            "cache_creation": usage.get("cache_creation", 0),
+            "cache_read": usage.get("cache_read", 0),
+            "estimated_cost": usage.get("estimated_cost", 0),
+            "transaction_count": usage.get("transaction_count", 0),
+        }
+
+        breakdown_md = self._format_budget_breakdown()
+        if breakdown_md:
+            summary = summary.rstrip() + "\n\n" + breakdown_md
         
         # Use ProjectWriter for consistent output (single session_summary.md)
         from ..core import ProjectWriter
         writer = ProjectWriter(
             project_path=self.session.project_path,
             project_name=self.session.project_name,
+            context_manager=self.context_manager,
         )
         
         writer.write_session_summary(
@@ -972,8 +1162,82 @@ This summary will be presented to the user.""",
             completed_workflows=self.session.completed_workflows,
             token_usage=token_usage,
         )
+
+        # Persist full accounting + aggregated breakdown for calibration/debugging
+        try:
+            writer.write_token_accounting(
+                token_usage=token_usage,
+                transactions=self.token_account.iter_transactions(),
+                aggregates={
+                    "by_workflow": self.token_account.aggregate(keys=("workflow",)),
+                    "by_agent": self.token_account.aggregate(keys=("agent_id",)),
+                    "by_workflow_agent": self.token_account.aggregate(keys=("workflow", "agent_id")),
+                    "by_workflow_trigger": self.token_account.aggregate(keys=("workflow", "trigger")),
+                },
+            )
+        except Exception:
+            pass
         
         return summary
+
+    def _format_budget_breakdown(self) -> str:
+        """Create a deterministic, truthful budget breakdown section."""
+        usage = self.token_account.usage_summary
+        if usage.get("total_used", 0) <= 0:
+            return ""
+
+        lines: list[str] = []
+        lines.append("## Budget Breakdown (Authoritative)")
+        lines.append("")
+        lines.append(f"- Total: {usage.get('total_used', 0):,} tokens ({usage.get('total_input', 0):,} in + {usage.get('total_output', 0):,} out)")
+        if usage.get("budget"):
+            lines.append(f"- Budget: {usage['total_used']:,} / {usage['budget']:,} ({usage.get('percentage_used', 0):.1f}% used)")
+        if usage.get("cache_read", 0) or usage.get("cache_creation", 0):
+            lines.append(f"- Cache: {usage.get('cache_read', 0):,} read, {usage.get('cache_creation', 0):,} created")
+        lines.append(f"- Transaction count: {usage.get('transaction_count', 0):,}")
+
+        # Allocation vs actual (BudgetManager)
+        try:
+            from ..config.budget_manager import get_budget_manager
+            bm = get_budget_manager()
+            bs = bm.get_summary()
+            wf_rows = []
+            # Actual by workflow from TokenAccount metadata
+            actual_by_wf = {r.get("workflow"): r for r in self.token_account.aggregate(keys=("workflow",))}
+            for wf, wb in (bs.get("workflows") or {}).items():
+                actual = (actual_by_wf.get(wf) or {}).get("total_tokens", 0)
+                alloc = int(wb.get("allocated", 0))
+                wf_rows.append((wf, alloc, int(actual)))
+            if wf_rows:
+                lines.append("")
+                lines.append("**Allocated vs Actual (by workflow)**")
+                for wf, alloc, actual in sorted(wf_rows, key=lambda x: x[2], reverse=True):
+                    delta = actual - alloc
+                    lines.append(f"- {wf}: allocated {alloc:,} | actual {actual:,} | delta {delta:+,}")
+        except Exception:
+            pass
+
+        # Biggest consumers: by workflow+agent
+        top = self.token_account.aggregate(keys=("workflow", "agent_id"))[:10]
+        if top:
+            lines.append("")
+            lines.append("**Top Token Consumers (workflow → agent)**")
+            for r in top:
+                wf = r.get("workflow") or "(unscoped)"
+                ag = r.get("agent_id") or "(unknown)"
+                lines.append(f"- {wf} → {ag}: {r.get('total_tokens', 0):,} tokens in {r.get('call_count', 0):,} calls")
+
+        # What triggers most LLM spend (after tool/after colleague)
+        trig = self.token_account.aggregate(keys=("workflow", "trigger"))[:10]
+        if trig:
+            lines.append("")
+            lines.append("**Top Triggers (what caused LLM calls)**")
+            for r in trig:
+                wf = r.get("workflow") or "(unscoped)"
+                tr = r.get("trigger") or "(none)"
+                lines.append(f"- {wf} → {tr}: {r.get('total_tokens', 0):,} tokens")
+
+        return "\n".join(lines)
     
     def _simple_summary(self) -> str:
         """Generate simple summary without LLM."""
@@ -1048,8 +1312,25 @@ Generate project name JSON:"""}
             # If Bohr identified this as continuing an existing project
             if is_continuation and continue_project and continue_project in existing_projects:
                 console.agent_message("BOHR", f"It looks like you want to continue: \033[1m{continue_project}\033[0m")
+                if self.transcript:
+                    self.transcript.log_agent_message("bohr", f"It looks like you want to continue: {continue_project}")
                 print(f"\n  Press Enter to confirm, or type a different project name:")
+
+                # Clear any buffered stdin (e.g. multi-line paste from initial request)
+                try:
+                    import sys as _sys
+                    import select as _select
+                    while True:
+                        r, _, _ = _select.select([_sys.stdin], [], [], 0)
+                        if not r:
+                            break
+                        _sys.stdin.readline()
+                except Exception:
+                    pass
+
                 user_input = input("\n  \033[1;32m▶\033[0m ").strip()
+                if self.transcript:
+                    self.transcript.log_user_response("Confirm/rename project", user_input)
                 
                 if user_input:
                     return user_input.replace(" ", "_")
@@ -1057,6 +1338,8 @@ Generate project name JSON:"""}
             
             # New project
             console.agent_message("BOHR", f"I suggest we call this project: \033[1m{suggested_name}\033[0m")
+            if self.transcript:
+                self.transcript.log_agent_message("bohr", f"I suggest we call this project: {suggested_name}")
             
             # Show related existing projects if any
             related = [p for p in existing_projects if any(
@@ -1070,7 +1353,22 @@ Generate project name JSON:"""}
                     print(f"    • {p}")
             
             print(f"\n  Press Enter to accept, or type a different name:")
+
+            # Clear any buffered stdin (e.g. multi-line paste from initial request)
+            try:
+                import sys as _sys
+                import select as _select
+                while True:
+                    r, _, _ = _select.select([_sys.stdin], [], [], 0)
+                    if not r:
+                        break
+                    _sys.stdin.readline()
+            except Exception:
+                pass
+
             user_input = input("\n  \033[1;32m▶\033[0m ").strip()
+            if self.transcript:
+                self.transcript.log_user_response("Accept/rename project", user_input)
             
             if user_input:
                 project_name = user_input.replace(" ", "_")
@@ -1080,8 +1378,12 @@ Generate project name JSON:"""}
             # Confirm
             if project_name in existing_projects:
                 console.agent_message("BOHR", f"Resuming project: {project_name}")
+                if self.transcript:
+                    self.transcript.log_agent_message("bohr", f"Resuming project: {project_name}")
             else:
                 console.agent_message("BOHR", f"Creating project: {project_name}")
+                if self.transcript:
+                    self.transcript.log_agent_message("bohr", f"Creating project: {project_name}")
             
             return project_name
             
@@ -1090,6 +1392,8 @@ Generate project name JSON:"""}
             console.warning(f"Could not generate smart name: {e}")
             fallback = f"project_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             console.agent_message("BOHR", f"Using default project name: {fallback}")
+            if self.transcript:
+                self.transcript.log_agent_message("bohr", f"Using default project name: {fallback} (name generation failed)")
             return fallback
     
     def interrupt(self) -> None:

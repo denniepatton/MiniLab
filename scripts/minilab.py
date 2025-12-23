@@ -18,6 +18,7 @@ import os
 import sys
 from pathlib import Path
 import json
+import select
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -148,7 +149,27 @@ def show_welcome() -> str:
     
     # Prompt for input
     try:
-        user_input = input("  \033[1;32m▶ Your request:\033[0m ").strip()
+        first_line = input("  \033[1;32m▶ Your request:\033[0m ")
+
+        # IMPORTANT: Users often paste multi-line requests.
+        # `input()` reads only the first line, leaving the rest buffered in stdin.
+        # That buffered text can get consumed by later prompts (e.g. project name confirmation)
+        # making it look like the CLI didn't wait for input.
+        lines = [first_line.rstrip("\n")]
+        try:
+            while True:
+                r, _, _ = select.select([sys.stdin], [], [], 0)
+                if not r:
+                    break
+                extra = sys.stdin.readline()
+                if extra == "":
+                    break
+                lines.append(extra.rstrip("\n"))
+        except Exception:
+            # If select isn't available or stdin isn't a real file descriptor, fall back.
+            pass
+
+        user_input = "\n".join(lines).strip()
         return user_input
     except (KeyboardInterrupt, EOFError):
         print("\n\n  Goodbye!")

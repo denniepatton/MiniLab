@@ -1,0 +1,80 @@
+# MiniLab Budget Configuration
+# 
+# This configuration defines dynamic budget allocation strategies.
+# Agents can adapt these allocations based on project complexity,
+# user preferences, and runtime conditions.
+#
+# Philosophy: Provide GUIDELINES, not rigid constraints.
+# Agents should use judgment to optimize within the overall budget.
+
+# Default workflow budget allocations (percentages of total session budget)
+# These are STARTING POINTS - agents can reallocate dynamically
+workflow_allocations:
+  consultation: 0.05       # Quick: understand user needs
+  literature_review: 0.20  # Background research
+  planning_committee: 0.15 # Multi-agent deliberation
+  execute_analysis: 0.35   # Core work - largest allocation
+  writeup_results: 0.15    # Documentation and reports
+  critical_review: 0.10    # Quality assurance
+
+# Budget warning thresholds (percentage of total budget)
+# Agents receive notifications at these levels
+warning_thresholds:
+  - 60   # Informational: entering second half
+  - 80   # Warning: start prioritizing completion
+  - 95   # Critical: wrap up immediately
+
+# Complexity-based budget scaling
+# Agents can request budget adjustments based on detected complexity
+complexity_multipliers:
+  simple:
+    description: "Narrow scope, clear deliverables, limited data"
+    literature_review: 0.10
+    planning_committee: 0.05
+    execute_analysis: 0.50
+  moderate:
+    description: "Standard research project"
+    # Uses default allocations
+  complex:
+    description: "Multi-modal data, extensive methodology, broad scope"
+    literature_review: 0.25
+    planning_committee: 0.20
+    execute_analysis: 0.30
+  exploratory:
+    description: "Open-ended research, hypothesis generation"
+    literature_review: 0.30
+    planning_committee: 0.25
+    execute_analysis: 0.20
+    writeup_results: 0.10
+    critical_review: 0.05
+
+# Agent behavior guidance at different budget levels
+budget_behavior:
+  healthy:  # <60% used
+    guidance: "Proceed normally. Full depth analysis permitted."
+    allow_colleague_consultations: true
+    allow_optional_steps: true
+  caution:  # 60-80% used
+    guidance: "Be efficient. Skip optional elaboration. Focus on core deliverables."
+    allow_colleague_consultations: true
+    allow_optional_steps: false
+  critical:  # >80% used
+    guidance: "Wrap up. Complete current task minimally. Skip non-essential work."
+    allow_colleague_consultations: false
+    allow_optional_steps: false
+  exhausted:  # >95% used
+    guidance: "Save state and exit gracefully. Document what was completed."
+    allow_colleague_consultations: false
+    allow_optional_steps: false
+
+# Token cost estimates (for budget planning)
+# Agents can use these to estimate task costs
+cost_estimates:
+  pubmed_search: 500       # tokens per search
+  arxiv_search: 500        # tokens per search
+  file_read_small: 200     # <1KB file
+  file_read_medium: 1000   # 1-10KB file
+  file_read_large: 5000    # >10KB file
+  code_execution: 1500     # typical script run
+  colleague_consultation: 3000  # typical back-and-forth
+  comprehensive_analysis: 15000 # full agent task

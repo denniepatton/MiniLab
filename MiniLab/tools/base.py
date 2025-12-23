@@ -57,6 +57,7 @@ class Tool(ABC):
         self,
         agent_id: str,
         permission_callback: Optional[Callable[[str], bool]] = None,
+        **_unused: Any,
     ):
         """
         Initialize tool with agent context.

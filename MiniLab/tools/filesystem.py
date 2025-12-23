@@ -14,6 +14,7 @@ from typing import Any, Optional, Union
 from pydantic import Field
 
 from .base import Tool, ToolInput, ToolOutput, ToolError
+from ..context import ContextManager
 from ..security import PathGuard, AccessDenied
 from ..utils import console
 
@@ -120,10 +121,70 @@ class FileSystemTool(Tool):
     name = "filesystem"
     description = "Read and write files within allowed directories (ReadData/ for reading, Sandbox/ for writing)"
     
-    def __init__(self, agent_id: str, workspace_root: Path, **kwargs):
+    def __init__(
+        self,
+        agent_id: str,
+        workspace_root: Path,
+        context_manager: Optional[ContextManager] = None,
+        auto_index: bool = True,
+        max_index_bytes: int = 2_000_000,
+        **kwargs,
+    ):
         super().__init__(agent_id, **kwargs)
         self.workspace_root = workspace_root
         self.path_guard = PathGuard.get_instance()
+        self.context_manager = context_manager
+        self.auto_index = auto_index
+        self.max_index_bytes = max_index_bytes
+
+    def _infer_project_name(self, path: Path) -> Optional[str]:
+        """Infer Sandbox/<project>/... project name from an absolute path."""
+        try:
+            rel = path.relative_to(self.workspace_root)
+        except ValueError:
+            return None
+        parts = rel.parts
+        if len(parts) >= 2 and parts[0] == "Sandbox":
+            return parts[1]
+        return None
+
+    def _should_index(self, path: Path) -> bool:
+        if not self.auto_index or not self.context_manager:
+            return False
+        if not path.exists() or not path.is_file():
+            return False
+        try:
+            rel = path.relative_to(self.workspace_root)
+        except ValueError:
+            return False
+        if not rel.parts or rel.parts[0] != "Sandbox":
+            return False
+        if any(part.startswith(".") for part in rel.parts):
+            return False
+        try:
+            if path.stat().st_size > self.max_index_bytes:
+                return False
+        except Exception:
+            return False
+
+        # Only index common text-like formats by default
+        ext = path.suffix.lower()
+        if ext in {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".toml", ".csv"}:
+            return True
+        if ext == "":
+            return True
+        return False
+
+    def _maybe_index(self, path: Path) -> None:
+        if not self._should_index(path):
+            return
+        project_name = self._infer_project_name(path)
+        if not project_name:
+            return
+        try:
+            self.context_manager.index_file(project_name=project_name, file_path=path)
+        except Exception:
+            pass
     
     def get_actions(self) -> dict[str, str]:
         return {
@@ -228,6 +289,8 @@ class FileSystemTool(Tool):
         # Create parent directories if needed
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(params.content, encoding=params.encoding)
+
+        self._maybe_index(path)
         
         console.file_write(params.path)
         return FileOutput(success=True, path=str(path), data=f"Wrote {len(params.content)} bytes")
@@ -239,6 +302,8 @@ class FileSystemTool(Tool):
         
         with open(path, "a", encoding=params.encoding) as f:
             f.write(params.content)
+
+        self._maybe_index(path)
         
         return FileOutput(success=True, path=str(path), data=f"Appended {len(params.content)} bytes")
     
@@ -429,6 +494,9 @@ class FileSystemTool(Tool):
             shutil.copytree(src, dst)
         else:
             shutil.copy2(src, dst)
+
+        if dst.exists() and dst.is_file():
+            self._maybe_index(dst)
         
         return FileOutput(success=True, data=f"Copied {src} to {dst}")
     
@@ -448,5 +516,8 @@ class FileSystemTool(Tool):
         
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(src, dst)
+
+        if dst.exists() and dst.is_file():
+            self._maybe_index(dst)
         
         return FileOutput(success=True, data=f"Moved {src} to {dst}")
