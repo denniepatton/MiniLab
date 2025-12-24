@@ -1,2 +1,0 @@
-{"type": "plan", "workflow": "literature_review", "goal": "Review recent advances in CHIP mutations and cancer therapy", "dry_run": true, "timestamp": "2025-12-23T13:16:12.303264"}
-{"type": "complete", "status": "success", "dry_run": true, "artifacts": ["provenance.json", "summary.md", "runlog.jsonl", "literature/summary.md", "literature/references.md"], "timestamp": "2025-12-23T13:16:12.303641"}
