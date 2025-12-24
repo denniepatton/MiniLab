@@ -22,7 +22,7 @@ Quick Start:
     )
 """
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 
 # Core components
 from .core import TokenAccount, get_token_account, ProjectWriter, BudgetExceededError

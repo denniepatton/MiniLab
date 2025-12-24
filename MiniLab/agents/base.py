@@ -146,6 +146,8 @@ class Agent:
     
     Features:
     - ReAct-style: Call LLM -> Run tool -> Append result -> Repeat
+    - Self-critique before committing outputs (CellVoyager pattern)
+    - Budget-scaled iterations (VS Code bounded tool calling)
     - Persistent state per task
     - Interrupt/pause capabilities
     - Typed tool integration
@@ -162,6 +164,11 @@ class Agent:
         r"```(tool|colleague|done|extend)\s*(.*?)\s*```",
         re.DOTALL,
     )
+    
+    # Budget-scaled iteration limits
+    MIN_ITERATIONS = 10  # Floor for even the smallest budgets
+    MAX_ITERATIONS_CAP = 100  # Ceiling for safety
+    TOKENS_PER_ITERATION = 3000  # Rough estimate of tokens per ReAct iteration
 
     def _strip_action_blocks_for_transcript(self, text: str) -> str:
         """Remove tool/colleague/done/extend fenced blocks for transcript readability."""
@@ -195,7 +202,7 @@ class Agent:
             llm_backend: LLM backend for completions
             tools: Dict of tool name to Tool instance
             context_manager: Context manager for RAG
-            max_iterations: Max ReAct iterations
+            max_iterations: Max ReAct iterations (can be scaled by budget)
             transcript_logger: Optional transcript logger for session logging
         """
         self.agent_id = agent_id
@@ -205,7 +212,8 @@ class Agent:
         self.llm = llm_backend
         self.tools = tools
         self.context_manager = context_manager
-        self.max_iterations = max_iterations
+        self._base_max_iterations = max_iterations
+        self.max_iterations = max_iterations  # May be scaled by budget
         self.transcript = transcript_logger
         
         # Set agent_id on LLM backend for token tracking
@@ -230,6 +238,10 @@ class Agent:
 
         # Token attribution: what triggered the next LLM call
         self._next_llm_trigger: Optional[str] = None
+        
+        # Self-critique tracking
+        self._critique_enabled: bool = True
+        self._last_critique: Optional[str] = None
     
     def set_transcript(self, transcript_logger: Any) -> None:
         """Set the transcript logger for this agent."""
@@ -238,6 +250,200 @@ class Agent:
     def set_colleagues(self, colleagues: dict[str, Agent]) -> None:
         """Set colleague references."""
         self.colleagues = colleagues
+    
+    def scale_iterations_to_budget(self, workflow_budget: Optional[int] = None) -> int:
+        """
+        Scale max_iterations based on available budget.
+        
+        Implements VS Code-style bounded tool calling where iterations
+        are proportional to allocated budget.
+        
+        Args:
+            workflow_budget: Budget for current workflow (tokens)
+        
+        Returns:
+            Scaled max_iterations
+        """
+        if not workflow_budget:
+            # Try to get from BudgetManager
+            try:
+                from ..config.budget_manager import get_budget_manager
+                from ..core.token_context import get_current_workflow
+                
+                workflow = get_current_workflow()
+                if workflow:
+                    wb = get_budget_manager().get_workflow_budget(workflow)
+                    if wb:
+                        workflow_budget = wb.remaining
+            except Exception:
+                pass
+        
+        if not workflow_budget or workflow_budget <= 0:
+            return self._base_max_iterations
+        
+        # Calculate iterations based on budget
+        # Each iteration costs ~TOKENS_PER_ITERATION tokens
+        budget_iterations = workflow_budget // self.TOKENS_PER_ITERATION
+        
+        # Clamp between MIN and MAX
+        scaled = max(self.MIN_ITERATIONS, min(self.MAX_ITERATIONS_CAP, budget_iterations))
+        
+        # Don't exceed configured max
+        self.max_iterations = min(scaled, self._base_max_iterations)
+        return self.max_iterations
+    
+    async def critique_output(
+        self,
+        output: str,
+        task: str,
+        context: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Self-critique an output before committing (CellVoyager pattern).
+        
+        Evaluates output quality and suggests improvements. Used before
+        finalizing important outputs like analysis plans or reports.
+        
+        Args:
+            output: The output to critique
+            task: Original task/objective
+            context: Additional context for evaluation
+        
+        Returns:
+            {
+                "approved": bool,  # Whether output passes critique
+                "issues": list[str],  # List of issues found
+                "suggestions": list[str],  # Improvement suggestions
+                "revised_output": Optional[str],  # Revised version if needed
+            }
+        """
+        if not self._critique_enabled:
+            return {"approved": True, "issues": [], "suggestions": [], "revised_output": None}
+        
+        critique_prompt = f"""You are reviewing your own work for quality before finalizing.
+
+## Original Task
+{task}
+
+{f"## Additional Context{chr(10)}{context}" if context else ""}
+
+## Output to Review
+{output[:8000]}{"..." if len(output) > 8000 else ""}
+
+## Critique Instructions
+Evaluate the output critically:
+1. Does it fully address the task requirements?
+2. Are there factual errors or inconsistencies?
+3. Is it well-structured and clear?
+4. Are there missing important elements?
+5. Could it be improved significantly?
+
+Respond with ONLY a JSON object:
+{{
+    "approved": true/false,
+    "issues": ["issue1", "issue2"],
+    "suggestions": ["suggestion1", "suggestion2"],
+    "needs_revision": true/false
+}}
+
+Be honest but not overly critical. Approve if the output is good enough."""
+
+        try:
+            from ..core.token_context import token_context
+            
+            messages = [
+                {"role": "system", "content": "You are a quality assurance critic. Be constructive but honest."},
+                {"role": "user", "content": critique_prompt}
+            ]
+            
+            with token_context(trigger="self_critique"):
+                response = await self.llm.acomplete(messages)
+            
+            # Parse response
+            response = response.strip()
+            if response.startswith("```"):
+                response = response.split("```")[1]
+                if response.startswith("json"):
+                    response = response[4:]
+                response = response.strip()
+            
+            critique = json.loads(response)
+            self._last_critique = json.dumps(critique, indent=2)
+            
+            return {
+                "approved": critique.get("approved", True),
+                "issues": critique.get("issues", []),
+                "suggestions": critique.get("suggestions", []),
+                "revised_output": None,  # Revision handled separately if needed
+            }
+            
+        except Exception as e:
+            # On error, approve to avoid blocking
+            return {
+                "approved": True,
+                "issues": [f"Critique failed: {e}"],
+                "suggestions": [],
+                "revised_output": None,
+            }
+    
+    async def incorporate_critique(
+        self,
+        output: str,
+        critique: dict[str, Any],
+        task: str,
+    ) -> str:
+        """
+        Revise output based on critique (CellVoyager pattern).
+        
+        Args:
+            output: Original output
+            critique: Critique results from critique_output()
+            task: Original task
+        
+        Returns:
+            Revised output
+        """
+        if critique.get("approved", True) and not critique.get("issues"):
+            return output
+        
+        issues_text = "\n".join(f"- {i}" for i in critique.get("issues", []))
+        suggestions_text = "\n".join(f"- {s}" for s in critique.get("suggestions", []))
+        
+        revision_prompt = f"""Revise your previous output based on self-critique feedback.
+
+## Original Task
+{task}
+
+## Previous Output
+{output[:6000]}{"..." if len(output) > 6000 else ""}
+
+## Issues Found
+{issues_text or "None"}
+
+## Suggestions
+{suggestions_text or "None"}
+
+## Instructions
+Revise the output to address the issues and incorporate suggestions.
+Keep what was good, fix what was problematic.
+Return ONLY the revised output, no explanation."""
+
+        try:
+            from ..core.token_context import token_context
+            
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": revision_prompt}
+            ]
+            
+            with token_context(trigger="incorporate_critique"):
+                revised = await self.llm.acomplete(messages)
+            
+            return revised.strip()
+            
+        except Exception:
+            # On error, return original
+            return output
     
     def enable_streaming(
         self,
@@ -279,6 +485,7 @@ class Agent:
         project_name: str,
         task_id: Optional[str] = None,
         resume_state: Optional[AgentState] = None,
+        workflow_budget: Optional[int] = None,
     ) -> AgentResponse:
         """
         Execute a task using the ReAct loop.
@@ -288,12 +495,16 @@ class Agent:
             project_name: Current project
             task_id: Unique task identifier (generated if not provided)
             resume_state: State to resume from (if paused previously)
+            workflow_budget: Budget for this workflow (scales iterations)
             
         Returns:
             AgentResponse with results
         """
         # Report activity to spinner
         self._report_activity(f"[{self.agent_id.upper()}] is starting task")
+        
+        # Scale iterations based on budget
+        self.scale_iterations_to_budget(workflow_budget)
         
         # Initialize or resume state
         if resume_state:

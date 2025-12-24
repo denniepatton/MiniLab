@@ -92,16 +92,28 @@ class WorkflowModule(ABC):
     primary_agents: list[str] = []
     supporting_agents: list[str] = []
     
-    # Budget allocation hints (percentage of total session budget)
-    # Workflows should self-regulate based on these guidelines
-    BUDGET_ALLOCATION = {
-        "consultation": 0.05,      # 5% - Quick, focused
-        "literature_review": 0.20, # 20% - Important but bounded
-        "planning_committee": 0.15,# 15% - Deliberation
-        "execute_analysis": 0.35,  # 35% - Core work
-        "writeup_results": 0.15,   # 15% - Documentation
-        "critical_review": 0.10,   # 10% - Quality check
-    }
+    # Budget allocation is now managed by BudgetManager singleton
+    # These are kept as fallback defaults only
+    @classmethod
+    def get_budget_allocation(cls, workflow_name: str) -> float:
+        """Get budget allocation from BudgetManager (single source of truth)."""
+        try:
+            from ..config.budget_manager import get_budget_manager
+            wb = get_budget_manager().get_workflow_budget(workflow_name)
+            if wb:
+                return wb.allocation_percent
+        except Exception:
+            pass
+        # Fallback defaults
+        defaults = {
+            "consultation": 0.05,
+            "literature_review": 0.20,
+            "planning_committee": 0.15,
+            "execute_analysis": 0.35,
+            "writeup_results": 0.15,
+            "critical_review": 0.10,
+        }
+        return defaults.get(workflow_name, 0.10)
     
     def __init__(
         self,

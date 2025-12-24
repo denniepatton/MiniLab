@@ -180,7 +180,22 @@ class AnthropicBackend(LLMBackend):
         max_tokens: int | None = None,
         max_retries: int = 3,
         use_cache: bool = True,
+        use_response_cache: bool = True,
     ) -> str:
+        # Check response cache first (for identical requests)
+        cache_key = None
+        if use_response_cache and temperature <= 0.2:  # Only cache deterministic responses
+            try:
+                from .cache import get_llm_cache
+                cache = get_llm_cache()
+                cache_key = cache.make_key(messages, self.model, temperature)
+                cached = cache.get(cache_key)
+                if cached:
+                    # Cache hit - return without API call
+                    return cached.response
+            except Exception:
+                pass  # Continue without response cache
+        
         # Track timing
         start_time = time.perf_counter()
         
@@ -261,8 +276,12 @@ class AnthropicBackend(LLMBackend):
                 result = data["content"][0]["text"]
                 
                 # Track token usage from response
+                input_tokens = 0
+                output_tokens = 0
                 if "usage" in data:
                     self._update_token_usage(data["usage"])
+                    input_tokens = data["usage"].get("input_tokens", 0)
+                    output_tokens = data["usage"].get("output_tokens", 0)
                     # Log cache effectiveness if timing enabled
                     usage = data["usage"]
                     cache_read = usage.get("cache_read_input_tokens", 0)
@@ -274,6 +293,17 @@ class AnthropicBackend(LLMBackend):
                                 print(f"  💾 Cache hit: {cache_read:,} tokens read from cache")
                             if cache_create > 0:
                                 print(f"  💾 Cache miss: {cache_create:,} tokens cached for future use")
+                
+                # Store in response cache for future identical requests
+                if cache_key and use_response_cache:
+                    try:
+                        from .cache import get_llm_cache
+                        get_llm_cache().set(
+                            cache_key, result, self.model,
+                            input_tokens, output_tokens
+                        )
+                    except Exception:
+                        pass
                 
                 # Record timing
                 duration_ms = (time.perf_counter() - start_time) * 1000

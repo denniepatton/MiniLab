@@ -21,19 +21,27 @@ The system employs a ReAct-style execution loop where agents autonomously use to
 - **Cross-agent consultation** with visible dialogue for transparency
 - **Dynamic delegation** based on task requirements and agent expertise
 
+### Intelligent Budget Management
+- **Bayesian learning** from historical token usage to improve allocation accuracy
+- **Continuous complexity estimation** (0.0-1.0 scale) replacing coarse tiers
+- **5% graceful shutdown reserve** ensuring clean completion within budget
+- **Budget-scaled iterations** adjusting agent loop limits based on remaining budget
+- **Self-critique checkpoints** verifying output quality before committing
+
 ### Autonomous Execution
 - **ReAct-style loops** enabling agents to reason, act, and observe iteratively
-- **Tool integration** for file operations, code execution, web search, and literature access
+- **LLM response caching** (SQLite-backed) reducing redundant API calls
 - **Checkpoint/resume capability** for long-running analyses
+- **Session orchestration** managing full lifecycle from startup to teardown
 
 ### Flexible Workflow System
 - **Six composable mini-workflows** that can be combined into larger pipelines
-- **Token budget management** with dynamic allocation across workflow phases
-- **Tiered modes** (Quick vs. Comprehensive) adapting to resource constraints
+- **Dynamic token allocation** based on workflow type and estimated complexity
+- **Adaptive modes** responding to project requirements
 
 ### Security and Safety
 - **PathGuard access control** enforcing read-only data directories and sandboxed outputs
-- **Agent-specific permissions** limiting tool access by role
+- **Agent-specific permissions** limiting tool access by role (defined in `team.yaml`)
 - **Audit logging** for all file operations
 
 ### User Experience
@@ -47,22 +55,34 @@ The system employs a ReAct-style execution loop where agents autonomously use to
 ```
 MiniLab/
 ├── agents/                    # Agent system
-│   ├── base.py               # Agent with ReAct loop, colleague consultation
+│   ├── base.py               # Agent with ReAct loop, self-critique, budget-scaled iterations
 │   ├── prompts.py            # Structured 5-part prompting schema
 │   └── registry.py           # Agent creation and colleague relationships
-├── config/
-│   ├── agents.yaml           # Agent personas and tool assignments
-│   └── loader.py             # YAML configuration loader
+├── config/                    # Configuration (separated by concern)
+│   ├── agents.yaml           # Agent personas, communication style, operating principles
+│   ├── team.yaml             # Security: tools, write permissions, shell access
+│   ├── budgets.yaml          # Token budgets per workflow type
+│   ├── loader.py             # YAML configuration loader for agents.yaml
+│   ├── team_loader.py        # YAML configuration loader for team.yaml
+│   ├── budget_manager.py     # Dynamic budget allocation with continuous complexity
+│   └── budget_history.py     # Bayesian learning from historical token usage
 ├── context/                   # RAG-based context management
 │   ├── context_manager.py    # Context orchestration with token budgets
 │   ├── embeddings.py         # Sentence-transformers integration
 │   ├── vector_store.py       # FAISS vector store for retrieval
 │   └── state_objects.py      # ProjectState, TaskState definitions
+├── core/                      # Core infrastructure
+│   ├── token_account.py      # Centralized token tracking with threshold warnings
+│   ├── token_context.py      # Token context for budget awareness
+│   └── project_writer.py     # Centralized output management
 ├── llm_backends/             # LLM integrations
-│   ├── anthropic_backend.py  # Claude API with prompt caching
-│   └── openai_backend.py     # OpenAI API support
+│   ├── anthropic_backend.py  # Claude API with prompt caching and cache integration
+│   ├── openai_backend.py     # OpenAI API support
+│   ├── cache.py              # SQLite-backed LLM response caching
+│   └── base.py               # Abstract backend interface
 ├── orchestrators/
-│   └── bohr_orchestrator.py  # Workflow coordination, session management
+│   ├── bohr_orchestrator.py  # Workflow coordination, session management
+│   └── session_orchestrator.py # Session lifecycle management
 ├── security/
 │   └── path_guard.py         # File access control and audit logging
 ├── storage/
@@ -174,6 +194,9 @@ python scripts/minilab.py --resume Sandbox/pluvicto_analysis
 
 # List existing projects
 python scripts/minilab.py --list-projects
+
+# Enable performance timing
+python scripts/minilab.py --timing
 ```
 
 ### Python API
@@ -200,42 +223,82 @@ During execution, you can interrupt with `Ctrl+C` to access options:
 3. **Save and exit** - Preserve progress for later resumption
 4. **Continue** - Cancel the interrupt and proceed
 
+## Budget Management System
+
+MiniLab v0.4.0 introduces an intelligent budget management system that learns from historical usage:
+
+### Bayesian Budget Learning
+
+The system maintains a history of token usage across workflows and uses Bayesian estimation to improve future allocations:
+
+```python
+# Budget history tracks actual vs. allocated tokens per workflow
+# Over time, allocations converge to realistic requirements
+```
+
+### Continuous Complexity Estimation
+
+Instead of coarse "Quick/Thorough/Comprehensive" tiers, complexity is now estimated as a continuous value (0.0-1.0):
+
+| Complexity | Description | Typical Use Case |
+|------------|-------------|------------------|
+| 0.0-0.3 | Simple | Quick questions, brainstorming |
+| 0.3-0.6 | Moderate | Standard analyses, literature reviews |
+| 0.6-0.8 | Complex | Multi-modal data, extensive pipelines |
+| 0.8-1.0 | Very Complex | Deep research, comprehensive analyses |
+
+### Budget Safeguards
+
+- **5% graceful shutdown reserve**: Always retains budget for clean completion
+- **Budget-scaled iterations**: Agent loop limits adjust based on remaining budget
+- **Self-critique checkpoints**: Agents verify output quality before committing
+- **Hard enforcement**: `BudgetExceededError` prevents runaway token usage
+
+### LLM Response Caching
+
+SQLite-backed caching reduces redundant API calls:
+- 24-hour TTL for cached responses
+- Automatic cache invalidation
+- Transparent integration with LLM backends
+
 ## Workflows
 
 ### Major Workflows
 
-| Workflow | Description | Token Budget Guidance |
-|----------|-------------|----------------------|
-| `brainstorming` | Explore ideas and hypotheses | Quick (~100K) |
-| `literature_review` | Background research and synthesis | Thorough (~500K) |
-| `start_project` | Full analysis pipeline | Comprehensive (~1M) |
-| `explore_dataset` | Data characterization and EDA | Thorough (~500K) |
-
-### Token Budget Tiers
-
-During consultation, you can select a budget tier:
-
-| Tier | Tokens | Estimated Cost | Use Case |
-|------|--------|----------------|----------|
-| Quick | ~100K | ~$0.50 | Fast exploration, simple queries |
-| Thorough | ~500K | ~$2.50 | Full analysis with figures |
-| Comprehensive | ~1M | ~$5.00 | Deep dive with extensive literature review |
-| Custom | User-specified | Varies | Fine-grained control |
-
-Cost estimates are based on empirical usage averaging approximately $5 per million tokens (input and output combined).
+| Workflow | Description | Complexity Guidance |
+|----------|-------------|---------------------|
+| `brainstorming` | Explore ideas and hypotheses | Low (0.2-0.4) |
+| `literature_review` | Background research and synthesis | Moderate (0.4-0.6) |
+| `start_project` | Full analysis pipeline | High (0.6-0.8) |
+| `explore_dataset` | Data characterization and EDA | Moderate (0.4-0.6) |
 
 ### Mini-Workflow Modules
 
-1. **Consultation** - User discussion, goal clarification, budget selection
-2. **Literature Review** - PubMed/arXiv search with critical assessment (Quick or Comprehensive mode)
+1. **Consultation** - User discussion, goal clarification, complexity estimation
+2. **Literature Review** - PubMed/arXiv search with critical assessment
 3. **Planning Committee** - Multi-agent deliberation on methodology
 4. **Execute Analysis** - Dayhoff→Hinton→Bayes implementation loop
 5. **Write-up Results** - Documentation and report generation
 6. **Critical Review** - Quality assessment and recommendations
 
+## Configuration Files
+
+MiniLab uses three main configuration files, each with a distinct purpose:
+
+| File | Purpose | Loaded By |
+|------|---------|-----------|
+| `config/agents.yaml` | Agent personas, communication style, operating principles | `loader.py` |
+| `config/team.yaml` | Security: tools, write permissions, shell access | `team_loader.py` |
+| `config/budgets.yaml` | Token budgets per workflow type | `budget_manager.py` |
+
+This separation of concerns allows:
+- **Personas** to be tuned independently of security
+- **Security policies** to be enforced uniformly
+- **Budgets** to be adjusted without touching agent definitions
+
 ## Security Model
 
-MiniLab enforces strict file access control:
+MiniLab enforces strict file access control via `PathGuard` and `team.yaml`:
 
 | Directory | Access | Purpose |
 |-----------|--------|---------|
@@ -243,9 +306,17 @@ MiniLab enforces strict file access control:
 | `Sandbox/` | Read-write | Project outputs and intermediate files |
 | Other paths | Blocked | No access outside workspace |
 
+### Agent-Specific Permissions (from `team.yaml`)
+
+| Agent | Shell Access | Writable Extensions |
+|-------|--------------|---------------------|
+| Hinton | ✓ | All |
+| Bayes | ✓ | `.py`, `.r`, `.R`, `.md`, `.txt`, `.json`, `.csv` |
+| Gould | ✗ | `.md`, `.txt`, `.bib`, `.json`, `.yaml`, `.yml` |
+| Others | ✗ | `.md`, `.txt`, `.json` |
+
 Additional protections:
 - Path traversal attacks are blocked
-- Agent-specific write permissions by file type
 - Comprehensive audit logging
 
 ## Project Output Structure
@@ -256,9 +327,13 @@ All outputs are organized within `Sandbox/{project_name}/`:
 {project_name}/
 ├── project_specification.md    # Goals and scope from consultation
 ├── data_manifest.md           # Summary of input data
+├── session.json               # Session state for resumption
 ├── literature/
 │   ├── references.md          # Bibliography
 │   └── literature_summary.md  # Narrative synthesis
+├── planning/
+│   ├── analysis_plan.md       # Detailed analysis plan
+│   └── decision_rationale.md  # Planning decisions
 ├── analysis/
 │   ├── exploratory/          # EDA scripts and outputs
 │   └── modeling/             # Statistical models
@@ -266,7 +341,8 @@ All outputs are organized within `Sandbox/{project_name}/`:
 ├── outputs/
 │   ├── summary_report.md     # Final findings
 │   └── tables/               # Result tables
-└── checkpoints/              # Workflow state for resumption
+├── checkpoints/              # Workflow state for resumption
+└── logs/                     # Execution logs
 ```
 
 ## Development
@@ -302,7 +378,7 @@ print("All imports successful")
 3. **Use descriptive project names** - Facilitates organization and resumption
 4. **Start with exploration** - Use `brainstorming` or `literature_review` to understand scope
 5. **Review transcripts** - Stored in `Transcripts/` for debugging and auditing
-6. **Set appropriate budgets** - Match token allocation to task complexity
+6. **Let budgets adapt** - The Bayesian system improves with use; trust its estimates
 
 ## Limitations
 
@@ -332,17 +408,18 @@ MiniLab is inspired by and builds upon ideas from:
 
 ## Changelog
 
-### Version 0.3.0 (December 2025)
-- Redesigned token budget system with Quick/Thorough/Comprehensive tiers and custom input
-- Narrative-style orchestrator communication
-- Visible cross-agent consultations
-- Tiered literature review (Quick 3-step vs. Comprehensive 7-step)
-- Immediate graceful exit with agent interruption propagation
-- Consolidated output file structure (single living documents)
-- Enhanced transcript system as single source of truth
-- Agent signature guidelines ("MiniLab Agent [Name]")
-- Timestamp utilities to prevent date hallucination
-- Post-consultation summary showing confirmed scope and budget
+### Version 0.4.0 (December 2025)
+- **Bayesian Budget Learning**: Historical token usage now informs future allocations via `BudgetHistory`
+- **Continuous Complexity Estimation**: Replaced coarse Quick/Thorough/Comprehensive tiers with 0.0-1.0 scale
+- **LLM Response Caching**: SQLite-backed cache with 24h TTL reduces redundant API calls
+- **Session Orchestrator**: New `SessionOrchestrator` manages full session lifecycle
+- **Self-Critique Checkpoints**: Agents verify output quality before committing (CellVoyager pattern)
+- **Budget-Scaled Iterations**: Agent loop limits adapt based on remaining budget (VS Code pattern)
+- **5% Graceful Shutdown Reserve**: Ensures clean completion within budget
+- **Codebase Cleanup**: Removed unused `runtime/` and `evaluation/` modules
+
+### Version 0.3.3 (December 2025)
+- Minor bug fixes and stability improvements
 
 ### Version 0.3.2 (December 2025)
 - **Intelligent Budget Allocation**: Bohr reserves 10% buffer for graceful completion, never exceeds budget
@@ -362,6 +439,18 @@ MiniLab is inspired by and builds upon ideas from:
 - **Single session_summary.md**: Prevented duplicate file creation by agents
 - **Output Guidelines**: Agents instructed not to create redundant files (executive_summary.md, etc.)
 - Budget warnings displayed to agents as they approach token limits
+
+### Version 0.3.0 (December 2025)
+- Redesigned token budget system with Quick/Thorough/Comprehensive tiers and custom input
+- Narrative-style orchestrator communication
+- Visible cross-agent consultations
+- Tiered literature review (Quick 3-step vs. Comprehensive 7-step)
+- Immediate graceful exit with agent interruption propagation
+- Consolidated output file structure (single living documents)
+- Enhanced transcript system as single source of truth
+- Agent signature guidelines ("MiniLab Agent [Name]")
+- Timestamp utilities to prevent date hallucination
+- Post-consultation summary showing confirmed scope and budget
 
 ### Version 0.2.0 (December 2025)
 - Complete architecture refactor

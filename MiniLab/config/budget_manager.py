@@ -2,7 +2,8 @@
 Dynamic Budget Manager for MiniLab.
 
 Provides flexible, agent-aware budget allocation that adapts to:
-- Project complexity (detected or user-specified)
+- Project complexity (continuous 0.0-1.0 scale, not tiers)
+- Historical data via Bayesian learning (BudgetHistory)
 - Runtime conditions (budget consumption rate)
 - Workflow phase transitions
 
@@ -12,6 +13,7 @@ Agents have autonomy to optimize within overall constraints.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -63,12 +65,18 @@ class BudgetManager:
     
     Key features:
     - Loads budget configuration from YAML
-    - Supports complexity-based scaling
+    - Supports continuous complexity scaling (0.0-1.0)
+    - Uses Bayesian learning from BudgetHistory
     - Provides runtime guidance to agents
     - Allows dynamic reallocation between workflows
     """
     
     _instance: Optional[BudgetManager] = None
+    
+    # Budget thresholds
+    BUDGET_WARNING = 80
+    BUDGET_CRITICAL = 95
+    BUDGET_RESERVE = 5  # 5% graceful shutdown reserve
     
     def __init__(self, config_path: Optional[Path] = None):
         if config_path is None:
@@ -77,7 +85,7 @@ class BudgetManager:
         self.config_path = config_path
         self._config: dict[str, Any] = {}
         self._total_budget: Optional[int] = None
-        self._complexity: str = "moderate"
+        self._complexity: float = 0.5  # Continuous 0.0-1.0
         self._workflow_budgets: dict[str, WorkflowBudget] = {}
         self._loaded = False
         
@@ -147,30 +155,120 @@ class BudgetManager:
     def initialize_session(
         self, 
         total_budget: int, 
-        complexity: str = "moderate"
+        complexity: str | float = 0.5
     ) -> None:
         """
         Initialize budget for a new session.
         
         Args:
             total_budget: Total token budget for the session
-            complexity: Project complexity level (simple/moderate/complex/exploratory)
+            complexity: Project complexity as:
+                - float 0.0-1.0 (continuous scale, preferred)
+                - str: "simple", "moderate", "complex", "exploratory" (converted to float)
         """
         self._total_budget = total_budget
-        self._complexity = complexity
+        self._complexity = self._normalize_complexity(complexity)
         self._thresholds_crossed = set()
         
-        # Get allocations based on complexity
-        allocations = self._get_allocations_for_complexity(complexity)
+        # Get allocations using Bayesian estimates from history
+        allocations = self._get_bayesian_allocations()
         
         # Create workflow budgets
         self._workflow_budgets = {}
-        for workflow_name, percent in allocations.items():
+        for workflow_name, allocated_tokens in allocations.items():
+            # Calculate effective allocation percent
+            percent = allocated_tokens / total_budget if total_budget > 0 else 0
             self._workflow_budgets[workflow_name] = WorkflowBudget(
                 workflow_name=workflow_name,
                 allocation_percent=percent,
-                allocated_tokens=int(total_budget * percent),
+                allocated_tokens=allocated_tokens,
             )
+    
+    def _normalize_complexity(self, complexity: str | float) -> float:
+        """Convert complexity to continuous 0.0-1.0 scale."""
+        if isinstance(complexity, (int, float)):
+            return max(0.0, min(1.0, float(complexity)))
+        
+        # Map string tiers to continuous values
+        tier_map = {
+            "simple": 0.2,
+            "moderate": 0.5,
+            "complex": 0.75,
+            "exploratory": 0.9,
+        }
+        return tier_map.get(str(complexity).lower(), 0.5)
+    
+    def _get_bayesian_allocations(self) -> dict[str, int]:
+        """
+        Get budget allocations using Bayesian estimates from BudgetHistory.
+        
+        Combines historical data with priors for better estimates.
+        Falls back to config-based allocations if history unavailable.
+        """
+        if not self._total_budget:
+            return {}
+        
+        try:
+            from .budget_history import get_budget_history
+            history = get_budget_history()
+            
+            # Get workflow list from config
+            workflows = list(self._config.get("workflow_allocations", {}).keys())
+            if not workflows:
+                workflows = [
+                    "consultation", "literature_review", "planning_committee",
+                    "execute_analysis", "writeup_results", "critical_review"
+                ]
+            
+            # Get Bayesian estimate for entire session
+            estimate = history.estimate_session(workflows, self._complexity)
+            
+            # Scale estimates to fit within total budget (minus 5% reserve)
+            usable_budget = int(self._total_budget * (1 - self.BUDGET_RESERVE / 100))
+            total_estimated = estimate["total_estimated"]
+            
+            if total_estimated <= 0:
+                # Fall back to config-based allocation
+                return self._get_allocations_for_complexity_legacy()
+            
+            # Scale factor to fit estimates within budget
+            scale = usable_budget / total_estimated if total_estimated > usable_budget else 1.0
+            
+            allocations = {}
+            for workflow_name in workflows:
+                wf_estimate = estimate["breakdown"].get(workflow_name, {})
+                estimated = wf_estimate.get("estimated_tokens", 0)
+                allocations[workflow_name] = int(estimated * scale)
+            
+            return allocations
+            
+        except Exception:
+            # Fall back to legacy config-based allocation
+            return self._get_allocations_for_complexity_legacy()
+    
+    def _get_allocations_for_complexity_legacy(self) -> dict[str, int]:
+        """Legacy config-based allocation (fallback)."""
+        if not self._total_budget:
+            return {}
+        
+        # Map continuous complexity to tier name for config lookup
+        if self._complexity < 0.35:
+            tier = "simple"
+        elif self._complexity < 0.65:
+            tier = "moderate"
+        elif self._complexity < 0.85:
+            tier = "complex"
+        else:
+            tier = "exploratory"
+        
+        allocations = self._get_allocations_for_complexity(tier)
+        
+        # Convert percentages to token counts
+        usable_budget = int(self._total_budget * (1 - self.BUDGET_RESERVE / 100))
+        return {
+            name: int(usable_budget * percent)
+            for name, percent in allocations.items()
+        }
     
     def _get_allocations_for_complexity(self, complexity: str) -> dict[str, float]:
         """Get budget allocations adjusted for complexity."""
@@ -370,3 +468,77 @@ class BudgetManager:
 def get_budget_manager() -> BudgetManager:
     """Get the global BudgetManager singleton."""
     return BudgetManager.get_instance()
+
+
+def estimate_complexity(
+    user_request: str,
+    data_files: Optional[list[str]] = None,
+    has_literature_phase: bool = True,
+) -> float:
+    """
+    Estimate project complexity on continuous 0.0-1.0 scale.
+    
+    Factors considered:
+    - Request length and vocabulary complexity
+    - Number and size of data files
+    - Presence of specific workflow phases
+    - Keywords indicating complexity
+    
+    Args:
+        user_request: User's initial request text
+        data_files: List of data file paths
+        has_literature_phase: Whether literature review is planned
+    
+    Returns:
+        Complexity score 0.0 (simple) to 1.0 (exploratory)
+    """
+    score = 0.5  # Start at moderate
+    
+    # Text length factor (longer requests tend to be more complex)
+    words = len(user_request.split())
+    if words < 50:
+        score -= 0.1
+    elif words > 200:
+        score += 0.1
+    elif words > 400:
+        score += 0.2
+    
+    # Complexity keywords
+    request_lower = user_request.lower()
+    
+    simple_keywords = [
+        "simple", "quick", "brief", "just", "only", "basic",
+        "single", "one", "straightforward"
+    ]
+    complex_keywords = [
+        "comprehensive", "thorough", "detailed", "multiple",
+        "integrate", "multimodal", "survival", "longitudinal",
+        "machine learning", "deep learning", "ensemble", "cross-validation",
+        "exploratory", "explore", "investigate"
+    ]
+    
+    for kw in simple_keywords:
+        if kw in request_lower:
+            score -= 0.05
+    
+    for kw in complex_keywords:
+        if kw in request_lower:
+            score += 0.05
+    
+    # Data file factor
+    if data_files:
+        file_count = len(data_files)
+        if file_count == 1:
+            score -= 0.05
+        elif file_count >= 3:
+            score += 0.05
+        elif file_count >= 5:
+            score += 0.1
+    
+    # Literature phase adds complexity
+    if has_literature_phase:
+        score += 0.05
+    
+    # Clamp to valid range
+    return max(0.0, min(1.0, score))
+
