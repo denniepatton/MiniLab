@@ -9,9 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from pathlib import Path
 import json
-import re
 
 from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
+from .plan_dissemination import (
+    extract_agent_responsibilities,
+)
 from ..utils import console
 
 
@@ -63,8 +65,8 @@ class PlanningCommitteeModule(WorkflowModule):
     name = "planning_committee"
     description = "Multi-agent deliberation for analysis planning"
     
-    required_inputs = ["project_spec", "literature_summary"]
-    optional_inputs = ["constraints", "prior_attempts", "max_turns"]
+    required_inputs = ["project_spec"]
+    optional_inputs = ["literature_summary", "constraints", "prior_attempts", "max_turns"]
     expected_outputs = ["analysis_plan", "responsibilities", "decision_rationale", "dialogue_transcript"]
     
     primary_agents = ["bohr"]  # Facilitator
@@ -118,7 +120,8 @@ class PlanningCommitteeModule(WorkflowModule):
             self._current_step = 0
             self._state = {
                 "project_spec": inputs["project_spec"],
-                "literature_summary": inputs["literature_summary"],
+                "literature_summary": inputs.get("literature_summary")
+                or "No literature review summary available yet. Proceed using domain expertise and the project specification.",
                 "dialogue": [],
                 "current_speaker": "bohr",
                 "topics_discussed": [],
@@ -145,7 +148,7 @@ Project Specification:
 {inputs['project_spec'][:2000]}
 
 Literature Background:
-{inputs['literature_summary']}
+{self._state.get('literature_summary', '')}
 
 Frame the key questions we need to answer:
 1. What is our overall analytical approach?
@@ -167,6 +170,9 @@ Present this to the committee and identify which expert should speak first.""",
                 self._state["topics_discussed"].append("framing")
                 self._current_step = 1
                 self.save_checkpoint()
+                
+                # Display Bohr's opening to the user
+                console.agent_message("BOHR", framing_result.get("response", ""))
             
             # Step 2: Open dialogue loop
             if self._current_step <= 1:
@@ -238,6 +244,9 @@ If you believe we're ready to converge on a plan, say "I believe we have consens
                     self._state["dialogue"].append(turn.__dict__)
                     turn_number += 1
                     
+                    # Display each agent's contribution to the user
+                    console.agent_message(next_speaker.upper(), turn.message)
+                    
                     # Check for consensus signals
                     if "consensus" in turn.message.lower():
                         self._state["consensus_points"].append(turn.message)
@@ -257,7 +266,7 @@ If you believe we're ready to converge on a plan, say "I believe we have consens
                 
                 plan_result = await self._run_agent_task(
                     agent_name="bohr",
-                    task=f"""Synthesize the planning committee discussion into a concrete analysis plan.
+                    task=f"""Synthesize the planning committee discussion into a concrete, EXPLICIT analysis plan.
 
 Full Discussion:
 {dialogue_history}
@@ -267,18 +276,36 @@ Consensus Points:
 
 Create a detailed analysis plan with:
 1. OBJECTIVE: Clear statement of what we're doing
-2. DATA PREPARATION: Steps for data processing
-3. METHODOLOGY: Specific methods and models to use
-4. VALIDATION: How we'll verify results
-5. TIMELINE: Logical sequence of steps
-6. RISKS: Key risks and mitigations
+2. DATA PREPARATION: Steps for data processing (be specific: which files, what cleaning)
+3. METHODOLOGY: Specific methods and models to use (algorithms, parameters, validation approach)
+4. VALIDATION: How we'll verify results (metrics, statistical tests, sanity checks)
+5. TIMELINE: Logical sequence of steps with dependencies (Task A → Task B → Task C)
+6. EXPECTED OUTPUTS: For each major step, specify:
+   - What files will be created
+   - Where they'll be stored (analysis/data/, analysis/code/, analysis/figures/, outputs/)
+   - What format they'll use (CSV, JSON, PNG, Markdown)
+   - What naming convention (descriptive-name.ext, 01_step_name.py)
+7. RISKS: Key risks and mitigations
 
-Format as a structured plan document.""",
+CRITICAL: Make the plan SPECIFIC and STRUCTURED so that:
+- Agents know exactly what outputs are expected from them
+- File locations are predetermined (prevents orphaned files)
+- Dependencies between steps are clear
+- No ambiguity about deliverables
+
+Format as a structured plan document with clear sections.""",
                 )
                 
                 self._state["analysis_plan"] = plan_result.get("response", "")
                 self._current_step = 3
                 self.save_checkpoint()
+                
+                # Display Bohr's synthesized plan to the user
+                print()
+                console.separator("─", 60)
+                console.info("📋 PROPOSED ANALYSIS PLAN")
+                console.separator("─", 60)
+                console.agent_message("BOHR", self._state["analysis_plan"])
             
             # Step 4: Assign responsibilities
             if self._current_step <= 3:
@@ -286,13 +313,32 @@ Format as a structured plan document.""",
                 
                 assign_result = await self._run_agent_task(
                     agent_name="bohr",
-                    task=f"""Based on the analysis plan, assign specific responsibilities to each agent.
+                    task=f"""Based on the analysis plan, assign EXPLICIT, SPECIFIC responsibilities to each agent.
 
 Analysis Plan:
 {self._state['analysis_plan']}
 
 Available Agents and Expertise:
 {json.dumps(self.AGENT_EXPERTISE, indent=2)}
+
+CRITICAL: For EACH agent you assign a task, specify:
+1. AGENT NAME (e.g., dayhoff, hinton, bayes)
+2. SPECIFIC TASK (concrete action, not vague "assist")
+3. REQUIRED OUTPUTS (exact files, formats, naming conventions)
+4. FILE LOCATIONS (specific directories: analysis/data/, analysis/code/, analysis/figures/, outputs/)
+5. INTEGRATION POINTS (what outputs from other agents they'll consume)
+
+Example format:
+---
+AGENT: dayhoff
+TASK: Prepare and preprocess clinical data for modeling
+OUTPUTS:
+  - analysis/data/clinical_cleaned.csv (cleaned patient data, documented columns)
+  - analysis/data/feature_matrix.csv (engineered features for modeling)
+  - analysis/code/01_data_preparation.py (reproducible preprocessing script)
+FILE NAMING: Use numbered prefixes (01_, 02_) to show execution order
+INTEGRATION: Outputs consumed by hinton for model training, shannon for feature selection
+---
 
 Assign tasks matching expertise:
 - Data processing tasks -> dayhoff
@@ -305,7 +351,13 @@ Assign tasks matching expertise:
 - Technical implementation -> feynman
 - Coordination -> bohr
 
-List each agent with their specific assigned tasks.""",
+Make assignments EXPLICIT and SPECIFIC. Each agent must know:
+- Exactly what to produce
+- Where to put it
+- What format to use
+- What naming convention to follow
+
+This prevents fragmentation and orphaned files.""",
                 )
                 
                 self._state["responsibilities"] = assign_result.get("response", "")
@@ -430,26 +482,18 @@ Rules:
         
         response = selection_result.get("response", "").strip()
         
-        # Parse JSON response
-        try:
-            # Handle markdown code blocks
-            if "```" in response:
-                json_match = re.search(r'```(?:json)?\s*(\{[^`]+\})\s*```', response, re.DOTALL)
-                if json_match:
-                    response = json_match.group(1)
-            
-            data = json.loads(response)
-            
-            if data.get("consensus_reached", False):
-                return "CONSENSUS"
-            
-            next_speaker = data.get("next_speaker", "").lower()
-            if next_speaker in self.AGENT_EXPERTISE:
-                return next_speaker
-        except (json.JSONDecodeError, AttributeError):
-            pass
+        # Parse JSON response using shared utility
+        from ..utils import extract_json_from_text
+        data = extract_json_from_text(response, fallback={})
         
-        # Fallback: look for agent names in response
+        if data.get("consensus_reached", False):
+            return "CONSENSUS"
+        
+        next_speaker = str(data.get("next_speaker", "")).lower()
+        if next_speaker in self.AGENT_EXPERTISE:
+            return next_speaker
+        
+        # Fallback: look for agent names in response text
         response_lower = response.lower()
         if "consensus" in response_lower:
             return "CONSENSUS"

@@ -8,6 +8,7 @@
 # - Rubrics for self-assessment
 # - Heuristics for decision-making
 # - Guardrails for safety (not creativity constraints)
+# - Cognitive mode guidance (divergent vs convergent thinking)
 
 # Core principle: Agents have FULL AUTONOMY within safety guardrails
 autonomy_principles:
@@ -16,6 +17,81 @@ autonomy_principles:
   - "Agents consult colleagues when THEY see value, not on schedule"
   - "Agents manage their own time/token allocation within budget"
   - "Agents can request more resources or suggest scope changes"
+  - "Agents implicitly choose their cognitive mode based on task requirements"
+
+# ============================================================================
+# COGNITIVE MODES: Divergent vs Convergent Thinking
+# ============================================================================
+# Agents should implicitly recognize which mode is appropriate for their task.
+# This is NOT a hardcoded switch - agents decide based on context.
+# Certain workflow steps may prime agents toward a mode, but final choice is theirs.
+
+cognitive_modes:
+  divergent:
+    description: "Exploration, hypothesis generation, brainstorming, literature review"
+    characteristics:
+      - "Generate multiple possibilities before narrowing down"
+      - "Ask 'what if' and 'why not' questions freely"
+      - "Explore tangential ideas that might be valuable"
+      - "Tolerate ambiguity and incomplete information"
+      - "Seek diverse perspectives from colleagues"
+      - "Breadth over depth initially"
+    typical_tasks:
+      - "Literature review and discovery"
+      - "Hypothesis generation"
+      - "Project scoping and ideation"
+      - "Exploring alternative approaches"
+      - "Understanding problem space"
+      - "Creative problem-solving"
+    iteration_style: "More turns allowed, wider exploration"
+    budget_guidance: "May use more tokens for exploration, but be mindful"
+    
+  convergent:
+    description: "Implementation, testing, verification, documentation, code generation"
+    characteristics:
+      - "Focus on concrete deliverables"
+      - "Make decisive choices and commit"
+      - "Verify correctness before moving on"
+      - "Minimize unnecessary variation"
+      - "Be concise and precise in output"
+      - "Depth over breadth"
+    typical_tasks:
+      - "Writing and debugging code"
+      - "Statistical analysis execution"
+      - "Document finalization"
+      - "Quality verification"
+      - "Testing hypotheses"
+      - "Generating final outputs"
+    iteration_style: "Efficient turns, clear stopping criteria"
+    budget_guidance: "Token-efficient, avoid over-engineering"
+
+# Mode selection heuristics (agents apply these implicitly)
+mode_selection:
+  favor_divergent_when:
+    - "Task is exploratory or open-ended"
+    - "Problem is poorly defined"
+    - "User asks for 'ideas', 'options', 'possibilities'"
+    - "Early in a project lifecycle"
+    - "Uncertainty about approach is high"
+    - "Multiple valid paths exist"
+  
+  favor_convergent_when:
+    - "Task has clear deliverables"
+    - "Problem is well-defined"
+    - "User asks for 'implementation', 'code', 'final version'"
+    - "Later in project lifecycle"
+    - "Approach has been decided"
+    - "Budget is limited (>70% used)"
+    - "Verification or testing phase"
+
+# Workflow-specific mode priming (suggestions, not mandates)
+workflow_mode_hints:
+  consultation: "mixed"          # Understand problem (divergent) then plan (convergent)
+  literature_review: "divergent" # Explore broadly, synthesize later
+  planning_committee: "divergent" # Generate options and discuss
+  execute_analysis: "convergent" # Implement decided approach
+  writeup_results: "convergent"  # Produce clear final output
+  critical_review: "convergent"  # Verify specific deliverables
 
 # Self-assessment rubric for agents
 # Agents can evaluate their own progress against these dimensions

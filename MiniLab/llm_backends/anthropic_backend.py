@@ -104,8 +104,16 @@ class AnthropicBackend(LLMBackend):
     
     Features:
     - Prompt caching for system prompts (reduces costs by up to 90% on cache hits)
+    - 1-hour cache TTL by default (better for long-running agentic tasks)
     - Token usage tracking (both local and via TokenAccount singleton)
     - Automatic retries on transient errors
+    - Project context appending to cached persona block
+    
+    Caching Strategy:
+    - Each agent has its own backend instance with a stable persona as the primary cache prefix
+    - After planning, project context can be appended to the persona block (still cached together)
+    - Per Anthropic docs: Cache order is tools → system → messages
+    - The system prompt (persona + context) should be kept stable to maximize cache hits
     """
 
     def __init__(
@@ -125,6 +133,12 @@ class AnthropicBackend(LLMBackend):
             timeout=180.0,  # Increased to 3 minutes for complex responses
         )
         
+        # Cached context: persona block that becomes the cache prefix
+        # This should be set once per agent and rarely changed
+        self._cached_persona: str = ""
+        # Project context to append after planning phase completes
+        self._project_context: str = ""
+        
         # Token usage tracking (local to this backend)
         self._total_input_tokens = 0
         self._total_output_tokens = 0
@@ -141,6 +155,59 @@ class AnthropicBackend(LLMBackend):
             "cache_read_tokens": self._total_cache_read_tokens,
             "total_tokens": self._total_input_tokens + self._total_output_tokens,
         }
+    
+    def set_persona(self, persona: str) -> None:
+        """
+        Set the agent's persona as the primary cache prefix.
+        
+        This should be called once when the agent is created.
+        The persona becomes the stable cache prefix that all subsequent
+        requests will share, maximizing cache hit rate.
+        """
+        self._cached_persona = persona
+    
+    def append_project_context(self, context: str) -> None:
+        """
+        Append project context to the cached system prompt.
+        
+        Call this after the planning phase completes. The context will be
+        appended to the persona block (still cached together as one block).
+        
+        Per Anthropic docs, keeping the system prompt stable maximizes cache hits.
+        Only append context once after planning - don't update frequently.
+        
+        Args:
+            context: Project plan, roles, structure summary to cache
+        """
+        if self._project_context:
+            # Replace rather than accumulate to keep cache stable
+            self._project_context = context
+        else:
+            self._project_context = context
+    
+    def get_full_system_prompt(self, additional_context: str = "") -> str:
+        """
+        Build the full system prompt combining persona, project context, and any additional context.
+        
+        Order matters for caching:
+        1. Persona (stable, set once)
+        2. Project context (set after planning, stable thereafter)
+        3. Additional context (if provided, may vary per call)
+        
+        Args:
+            additional_context: Optional per-call context (budget status, etc.)
+            
+        Returns:
+            Combined system prompt string
+        """
+        parts = []
+        if self._cached_persona:
+            parts.append(self._cached_persona)
+        if self._project_context:
+            parts.append(f"\n\n## PROJECT CONTEXT\n{self._project_context}")
+        if additional_context:
+            parts.append(f"\n\n{additional_context}")
+        return "".join(parts)
     
     def _update_token_usage(self, usage: dict, operation: str = "llm.complete") -> None:
         """Update token usage from API response - both local and global."""
@@ -182,6 +249,21 @@ class AnthropicBackend(LLMBackend):
         use_cache: bool = True,
         use_response_cache: bool = True,
     ) -> str:
+        # Enforce per-phase/workflow caps before making a potentially expensive call.
+        # This is the mechanism that prevents early planning phases from consuming
+        # nearly the entire session budget.
+        try:
+            from ..core import get_token_account
+            from ..core.token_context import get_workflow
+
+            account = get_token_account()
+            current_workflow = get_workflow()
+            planned = int(max_tokens or 4096)
+            account.enforce_workflow_cap(current_workflow, planned_tokens=planned)
+        except Exception:
+            # Best-effort: if enforcement plumbing isn't available, don't block calls.
+            pass
+
         # Check response cache first (for identical requests)
         cache_key = None
         if use_response_cache and temperature <= 0.2:  # Only cache deterministic responses
@@ -234,11 +316,13 @@ class AnthropicBackend(LLMBackend):
                 # Enable prompt caching beta
                 headers["anthropic-beta"] = "prompt-caching-2024-07-31"
                 # Format system as array with cache_control on last block
+                # Use 1-hour TTL for long-running tasks (agentic workflows typically >5 min)
+                # Per Anthropic docs: 1h cache is 2x input price but better for longer tasks
                 payload["system"] = [
                     {
                         "type": "text",
                         "text": system_content,
-                        "cache_control": {"type": "ephemeral"}
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"}
                     }
                 ]
             else:

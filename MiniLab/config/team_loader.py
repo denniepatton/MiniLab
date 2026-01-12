@@ -1,13 +1,10 @@
 """Team configuration loader.
 
-Loads a unified team configuration from `MiniLab/config/team.yaml`.
-This file is the single source of truth for:
-- which agents exist
-- which tools they can access
-- which tools are write-enabled (prompt labeling)
-- security capabilities for PathGuard
+Loads unified agent configuration from agents_unified.yaml (or agents.yaml).
+This loader is maintained for backwards compatibility with code that expects
+the TeamConfigLoader interface.
 
-Design intent: keep agent autonomy high by moving rigid policy out of code.
+Both this loader and loader.py now read from the same unified config file.
 """
 
 from __future__ import annotations
@@ -40,10 +37,23 @@ class TeamAgentConfig:
 
 
 class TeamConfigLoader:
+    """
+    Loads team configuration from unified agents YAML.
+    
+    This loader maintains backwards compatibility with code expecting
+    TeamConfigLoader interface while reading from the unified config.
+    """
     _instance: Optional["TeamConfigLoader"] = None
 
     def __init__(self, path: Optional[Path] = None):
-        self.path = path or (Path(__file__).parent / "team.yaml")
+        if path is None:
+            # Prefer unified config, fall back to legacy team.yaml
+            config_dir = Path(__file__).parent
+            unified_path = config_dir / "agents_unified.yaml"
+            legacy_path = config_dir / "team.yaml"
+            path = unified_path if unified_path.exists() else legacy_path
+        
+        self.path = path
         self._raw: dict[str, Any] = {}
         self._agents: dict[str, TeamAgentConfig] = {}
         self._triads: dict[str, list[str]] = {}
@@ -90,7 +100,22 @@ class TeamConfigLoader:
             )
 
         self._agents = parsed
-        self._triads = {k: [a.lower() for a in v] for k, v in (self._raw.get("triads", {}) or {}).items()}
+        
+        # Parse triads - handle both formats:
+        # Old format: triads: {name: [members]}
+        # New format: triads: {name: {members: [members], description: "..."}}
+        triads_raw = self._raw.get("triads", {}) or {}
+        for k, v in triads_raw.items():
+            if isinstance(v, list):
+                # Old format: list of members directly
+                self._triads[k] = [a.lower() for a in v]
+            elif isinstance(v, dict):
+                # New format: dict with 'members' key
+                members = v.get("members", [])
+                self._triads[k] = [a.lower() for a in members]
+            else:
+                self._triads[k] = []
+        
         self._loaded = True
 
     def get_agent(self, agent_id: str) -> Optional[TeamAgentConfig]:

@@ -10,7 +10,6 @@ Implements:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import time
@@ -20,8 +19,78 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..context import ContextManager, ProjectContext, TaskState
+from ..context import ContextManager
 from ..tools.base import Tool, ToolOutput
+
+
+# Human-readable descriptions for tool actions
+TOOL_ACTION_DESCRIPTIONS = {
+    # Filesystem operations
+    "filesystem.read": "reading file contents",
+    "filesystem.write": "writing file",
+    "filesystem.append": "appending to file",
+    "filesystem.head": "previewing file",
+    "filesystem.stats": "checking file info",
+    "filesystem.list": "listing directory",
+    "filesystem.create_dir": "creating directory",
+    "filesystem.delete": "deleting file",
+    "filesystem.move": "moving file",
+    "filesystem.copy": "copying file",
+    "filesystem.search": "searching files",
+    # Code editor operations
+    "code_editor.create": "creating script",
+    "code_editor.edit": "editing code",
+    "code_editor.run": "running script",
+    "code_editor.syntax_check": "checking syntax",
+    # Terminal operations
+    "terminal.execute": "running command",
+    "terminal.run_script": "executing script",
+    # Search operations
+    "web_search.search": "searching the web",
+    "pubmed.search": "searching PubMed",
+    "arxiv.search": "searching arXiv",
+    # Environment operations
+    "environment.check": "checking environment",
+    "environment.install": "installing package",
+    # User input
+    "user_input.ask": "asking user",
+    "user_input.confirm": "confirming with user",
+}
+
+
+def _humanize_tool_action(tool_action: str) -> str:
+    """Convert tool.action to human-readable description."""
+    if tool_action in TOOL_ACTION_DESCRIPTIONS:
+        return TOOL_ACTION_DESCRIPTIONS[tool_action]
+    # Fallback: make it readable
+    parts = tool_action.split(".")
+    if len(parts) == 2:
+        tool, action = parts
+        return f"{action.replace('_', ' ')}ing ({tool})"
+    return tool_action
+
+
+def _humanize_activity_list(activities: list[str]) -> str:
+    """Convert list of tool.action to human-readable summary."""
+    if not activities:
+        return "working"
+    
+    humanized = [_humanize_tool_action(a) for a in activities]
+    
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for h in humanized:
+        if h not in seen:
+            seen.add(h)
+            unique.append(h)
+    
+    if len(unique) == 1:
+        return unique[0]
+    elif len(unique) == 2:
+        return f"{unique[0]} and {unique[1]}"
+    else:
+        return f"{unique[0]}, {unique[1]}, and {len(unique) - 2} more"
 
 
 class AgentStatus(Enum):
@@ -30,6 +99,7 @@ class AgentStatus(Enum):
     RUNNING = "running"
     PAUSED = "paused"
     WAITING_USER = "waiting_user"
+    BUDGET_EXHAUSTED = "budget_exhausted"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -41,6 +111,7 @@ class AgentResponse:
     result: Optional[str] = None
     outputs: list[str] = field(default_factory=list)
     error: Optional[str] = None
+    stop_reason: Optional[str] = None
     iterations: int = 0
     tool_calls: int = 0
     colleague_calls: int = 0
@@ -51,6 +122,7 @@ class AgentResponse:
             "result": self.result,
             "outputs": self.outputs,
             "error": self.error,
+            "stop_reason": self.stop_reason,
             "iterations": self.iterations,
             "tool_calls": self.tool_calls,
             "colleague_calls": self.colleague_calls,
@@ -148,6 +220,7 @@ class Agent:
     - ReAct-style: Call LLM -> Run tool -> Append result -> Repeat
     - Self-critique before committing outputs (CellVoyager pattern)
     - Budget-scaled iterations (VS Code bounded tool calling)
+    - Continuous budget context during execution
     - Persistent state per task
     - Interrupt/pause capabilities
     - Typed tool integration
@@ -165,18 +238,40 @@ class Agent:
         re.DOTALL,
     )
     
-    # Budget-scaled iteration limits
-    MIN_ITERATIONS = 10  # Floor for even the smallest budgets
-    MAX_ITERATIONS_CAP = 100  # Ceiling for safety
-    TOKENS_PER_ITERATION = 3000  # Rough estimate of tokens per ReAct iteration
+    # More aggressive pattern for stripping - catches various LLM formatting styles
+    # Matches: ```tool, ``` tool, ```\ntool, etc.
+    STRIP_ACTION_PATTERN = re.compile(
+        r"```\s*(tool|colleague|done|extend)[\s\S]*?```",
+        re.DOTALL | re.IGNORECASE,
+    )
+    
+    # Iteration scaling is now dynamic based on budget
+    # These are fallback defaults, not hardcoded limits
+    DEFAULT_MAX_ITERATIONS = 50
 
     def _strip_action_blocks_for_transcript(self, text: str) -> str:
-        """Remove tool/colleague/done/extend fenced blocks for transcript readability."""
+        """
+        Remove tool/colleague/done/extend fenced blocks for transcript readability.
+        
+        The transcript should capture ALL agent reasoning and conversation,
+        but NOT the raw JSON action blocks which are logged separately as brief summaries.
+        """
         if not text:
             return ""
-        cleaned = self.ACTION_BLOCK_PATTERN.sub("", text)
-        # Also remove any now-empty triple-backtick remnants (defensive)
+        
+        # Use aggressive pattern to catch various LLM formatting styles
+        cleaned = self.STRIP_ACTION_PATTERN.sub("", text)
+        
+        # Also catch plain code blocks that look like JSON tool calls
+        # Pattern: ``` followed by { on same or next line, ending with }```
+        cleaned = re.sub(r'```\s*\{[^`]*\}\s*```', '', cleaned, flags=re.DOTALL)
+        
+        # Remove any now-empty triple-backtick remnants
         cleaned = re.sub(r"```\s*```", "", cleaned)
+        
+        # Clean up excessive whitespace/newlines from removed blocks
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        
         return cleaned.strip()
     
     def __init__(
@@ -255,42 +350,77 @@ class Agent:
         """
         Scale max_iterations based on available budget.
         
-        Implements VS Code-style bounded tool calling where iterations
-        are proportional to allocated budget.
+        This is now a soft guideline - agents self-regulate based on
+        continuous budget visibility during execution.
         
         Args:
             workflow_budget: Budget for current workflow (tokens)
         
         Returns:
-            Scaled max_iterations
+            Suggested max_iterations (agents can finish early based on budget)
         """
         if not workflow_budget:
-            # Try to get from BudgetManager
+            # Try to get from TokenAccount
             try:
-                from ..config.budget_manager import get_budget_manager
-                from ..core.token_context import get_current_workflow
-                
-                workflow = get_current_workflow()
-                if workflow:
-                    wb = get_budget_manager().get_workflow_budget(workflow)
-                    if wb:
-                        workflow_budget = wb.remaining
+                from ..core import get_token_account
+                account = get_token_account()
+                if account.budget:
+                    workflow_budget = account.budget - account.total_used
             except Exception:
                 pass
         
         if not workflow_budget or workflow_budget <= 0:
             return self._base_max_iterations
         
-        # Calculate iterations based on budget
-        # Each iteration costs ~TOKENS_PER_ITERATION tokens
-        budget_iterations = workflow_budget // self.TOKENS_PER_ITERATION
+        # Rough estimate: each iteration costs ~3000 tokens
+        estimated_iterations = workflow_budget // 3000
         
-        # Clamp between MIN and MAX
-        scaled = max(self.MIN_ITERATIONS, min(self.MAX_ITERATIONS_CAP, budget_iterations))
+        # Use sensible bounds based on budget
+        if estimated_iterations < 5:
+            self.max_iterations = 5  # Minimum to be useful
+        elif estimated_iterations > self._base_max_iterations:
+            self.max_iterations = self._base_max_iterations
+        else:
+            self.max_iterations = estimated_iterations
         
-        # Don't exceed configured max
-        self.max_iterations = min(scaled, self._base_max_iterations)
         return self.max_iterations
+    
+    def _get_budget_context(self) -> str:
+        """
+        Get current budget context as natural language for injection into prompts.
+        
+        This provides agents with continuous budget visibility so they can
+        self-regulate their work intensity.
+        """
+        try:
+            from ..core import get_token_account
+            account = get_token_account()
+            
+            if not account.budget or account.budget <= 0:
+                return ""
+            
+            pct_used = (account.total_used / account.budget) * 100
+            remaining = account.budget - account.total_used
+            
+            # Build natural language context
+            lines = []
+            lines.append(f"Budget: {pct_used:.0f}% used ({account.total_used:,} of {account.budget:,} tokens)")
+            lines.append(f"Remaining: approximately {remaining:,} tokens")
+            
+            # Add guidance based on budget level
+            if pct_used >= 90:
+                lines.append("⚠️ Budget nearly exhausted. Finish your current task and wrap up immediately.")
+            elif pct_used >= 75:
+                lines.append("Budget is constrained. Complete your core deliverable without additional exploration.")
+            elif pct_used >= 50:
+                lines.append("Budget is moderate. Focus on essential tasks and be efficient.")
+            else:
+                lines.append("Budget is healthy. Proceed with your work.")
+            
+            return "\n".join(lines)
+            
+        except Exception:
+            return ""
     
     async def critique_output(
         self,
@@ -500,8 +630,9 @@ Return ONLY the revised output, no explanation."""
         Returns:
             AgentResponse with results
         """
-        # Report activity to spinner
-        self._report_activity(f"[{self.agent_id.upper()}] is starting task")
+        # Report activity - extract task essence for log
+        task_preview = task[:100] + "..." if len(task) > 100 else task
+        self._report_activity(f"[{self.agent_id.upper()}] is beginning work: {task_preview}")
         
         # Scale iterations based on budget
         self.scale_iterations_to_budget(workflow_budget)
@@ -533,20 +664,9 @@ Return ONLY the revised output, no explanation."""
         )
         
         # Get current budget status for context injection
-        budget_status = ""
-        try:
-            from ..core import get_token_account
-            account = get_token_account()
-            if account.budget and account.budget > 0:
-                pct_used = (account.total_used / account.budget) * 100
-                remaining = account.budget - account.total_used
-                budget_status = f"\n\n## Budget Status\n📊 {pct_used:.0f}% of session budget used ({account.total_used:,}/{account.budget:,} tokens). ~{remaining:,} remaining."
-                if pct_used >= 80:
-                    budget_status += "\n⚠️ Budget is constrained. Prioritize completing core deliverables."
-                elif pct_used >= 60:
-                    budget_status += "\n📝 Be efficient. Focus on actionable outputs."
-        except (ImportError, Exception):
-            pass  # Budget tracking not available
+        budget_status = self._get_budget_context()
+        if budget_status:
+            budget_status = f"\n\n## Budget Status\n{budget_status}"
         
         # Initialize messages if starting fresh
         if not state.messages:
@@ -586,7 +706,7 @@ Return ONLY the revised output, no explanation."""
                 from ..core import get_token_account, BudgetExceededError
                 account = get_token_account()
                 if account.is_budget_exceeded():
-                    state.status = AgentStatus.COMPLETED
+                    state.status = AgentStatus.BUDGET_EXHAUSTED
                     state.completed_at = datetime.now()
                     if self.transcript:
                         self.transcript.log_agent_message(
@@ -594,8 +714,9 @@ Return ONLY the revised output, no explanation."""
                             message="Budget limit reached - wrapping up with current progress",
                         )
                     return AgentResponse(
-                        status=AgentStatus.COMPLETED,
+                        status=AgentStatus.BUDGET_EXHAUSTED,
                         result="Budget limit reached - wrapping up with current progress",
+                        stop_reason="budget_exceeded",
                         iterations=state.iteration,
                         tool_calls=len(state.tool_calls),
                         colleague_calls=len(state.colleague_calls),
@@ -604,6 +725,15 @@ Return ONLY the revised output, no explanation."""
                 pass  # Budget checking not available
             
             state.iteration += 1
+            
+            # Real-time progress update via ActivityLog - only show on first iteration
+            # Subsequent iterations will show tool/action descriptions instead
+            if state.iteration == 1:
+                try:
+                    from ..utils import ActivityLog
+                    ActivityLog.set_global_activity(f"[{self.agent_id.upper()}] is analyzing the task...")
+                except Exception:
+                    pass
             
             # Call LLM (with streaming if enabled)
             try:
@@ -619,6 +749,11 @@ Return ONLY the revised output, no explanation."""
                     def on_chunk(chunk: str) -> None:
                         if self.on_stream_chunk:
                             self.on_stream_chunk(self.agent_id, chunk)
+                        if self.transcript:
+                            try:
+                                self.transcript.log_stream_chunk(self.agent_id, chunk)
+                            except Exception:
+                                pass
 
                     with token_context(trigger=trigger):
                         response = await self.llm.acomplete_streaming(
@@ -669,8 +804,25 @@ Return ONLY the revised output, no explanation."""
                 )
             
             elif action_result["type"] in {"tool", "tool_batch", "colleague", "colleague_batch", "action_batch"}:
+                # Show what action was taken via ActivityLog
+                try:
+                    from ..utils import ActivityLog
+                    action_desc = action_result.get("action_description", "executing action")
+                    ActivityLog.set_global_activity(f"[{self.agent_id.upper()}] {action_desc}")
+                except Exception:
+                    pass
+                
                 for msg in action_result.get("messages", []):
                     state.messages.append(msg)
+                
+                # Inject budget update every 5 iterations so agent stays aware
+                if state.iteration % 5 == 0:
+                    budget_update = self._get_budget_context()
+                    if budget_update:
+                        state.messages.append({
+                            "role": "user",
+                            "content": f"[Budget Update]\n{budget_update}",
+                        })
             
             elif action_result["type"] == "extend":
                 # Agent requested more iterations
@@ -718,6 +870,8 @@ Return ONLY the revised output, no explanation."""
         messages_to_append: list[dict[str, str]] = []
         tool_messages: list[dict[str, str]] = []
         colleague_messages: list[dict[str, str]] = []
+        tool_descriptions: list[str] = []
+        colleague_descriptions: list[str] = []
         extend_requested = False
 
         for m in matches:
@@ -775,6 +929,7 @@ Return ONLY the revised output, no explanation."""
                     "role": "user",
                     "content": f"Tool result ({tool_name}.{action}):\n{result}",
                 })
+                tool_descriptions.append(f"{tool_name}.{action}")
                 continue
 
             if block_type == "colleague":
@@ -808,17 +963,21 @@ Return ONLY the revised output, no explanation."""
                     "role": "user",
                     "content": f"Response from {colleague_id}:\n{result}",
                 })
+                colleague_descriptions.append(f"consulting {colleague_id}")
                 continue
 
         if tool_messages and colleague_messages:
             messages_to_append = tool_messages + colleague_messages
-            return {"type": "action_batch", "messages": messages_to_append}
+            desc = _humanize_activity_list(tool_descriptions + colleague_descriptions)
+            return {"type": "action_batch", "messages": messages_to_append, "action_description": desc}
 
         if tool_messages:
-            return {"type": "tool_batch", "messages": tool_messages}
+            desc = _humanize_activity_list(tool_descriptions) if tool_descriptions else "using tools"
+            return {"type": "tool_batch", "messages": tool_messages, "action_description": desc}
 
         if colleague_messages:
-            return {"type": "colleague_batch", "messages": colleague_messages}
+            desc = ", ".join(colleague_descriptions) if colleague_descriptions else "consulting colleagues"
+            return {"type": "colleague_batch", "messages": colleague_messages, "action_description": desc}
 
         if extend_requested:
             return {"type": "extend"}
@@ -840,6 +999,17 @@ Return ONLY the revised output, no explanation."""
         if tool_name not in self.tools:
             return f"Error: Unknown tool '{tool_name}'"
         
+        # Check tool selector for permission
+        try:
+            from ..tools import get_tool_selector
+            selector = get_tool_selector()
+            if not selector.is_action_allowed(self.agent_id, tool_name, action):
+                return f"Error: Action '{tool_name}.{action}' is not enabled for this agent"
+            # Record usage
+            selector.record_usage(self.agent_id, tool_name, action)
+        except ImportError:
+            pass  # Tool selector not available
+        
         tool = self.tools[tool_name]
         
         # Report activity
@@ -849,8 +1019,38 @@ Return ONLY the revised output, no explanation."""
         if self.on_tool_call:
             self.on_tool_call(tool_name, action, params)
         
+        call_id: Optional[str] = None
+        started_at = time.time()
+        if self.transcript:
+            try:
+                call_id = self.transcript.log_tool_call(
+                    agent_name=self.agent_id,
+                    tool_name=tool_name,
+                    action=action,
+                    params=params,
+                )
+            except Exception:
+                call_id = None
+
         try:
-            result: ToolOutput = await tool.execute(action, params)
+            # Use two-phase execution if available
+            if hasattr(tool, 'prepare_and_execute'):
+                prepared, result = await tool.prepare_and_execute(action, params)
+                
+                # Log preparation if it required confirmation
+                if prepared.requires_confirmation and self.transcript:
+                    try:
+                        self.transcript.log_agent_message(
+                            agent_name=self.agent_id,
+                            message=f"⚠️ Tool {tool_name}.{action} required confirmation",
+                        )
+                    except Exception:
+                        pass
+                
+                if result is None:
+                    return "Tool execution cancelled"
+            else:
+                result = await tool.execute(action, params)
             
             # Record tool call
             state.tool_calls.append({
@@ -860,27 +1060,96 @@ Return ONLY the revised output, no explanation."""
                 "success": result.success,
                 "timestamp": datetime.now().isoformat(),
             })
-                        # Log to transcript
-            if self.transcript:
-                result_summary = result.data[:100] if result.data else ""
-                self.transcript.log_tool_use(
-                    agent_name=self.agent_id,
+            
+            # Build full-fidelity raw output text (saved to transcript artifacts)
+            try:
+                raw_obj = result.model_dump()
+            except Exception:
+                raw_obj = {"success": bool(getattr(result, "success", False)), "data": getattr(result, "data", None), "error": getattr(result, "error", None)}
+
+            raw_text = json.dumps(raw_obj, indent=2, default=str)
+            raw_bytes_len = len(raw_text.encode("utf-8", errors="replace"))
+
+            # Persist artifact and create an injected summary for the LLM
+            artifact_rel: Optional[str] = None
+            if self.transcript and call_id:
+                try:
+                    artifact_rel = self.transcript.save_tool_artifact(call_id=call_id, content=raw_text, suffix=".json")
+                except Exception:
+                    artifact_rel = None
+
+            # Human-readable snippet for transcript/LLM
+            snippet_src = ""
+            try:
+                snippet_src = str(result.data) if result.data is not None else (result.error or "")
+            except Exception:
+                snippet_src = ""
+            snippet = snippet_src.strip().replace("\r\n", "\n")
+            if len(snippet) > 800:
+                snippet = snippet[:800] + "\n...[truncated]"
+
+            injected_lines = [
+                f"status={'success' if result.success else 'error'}",
+            ]
+            if snippet:
+                injected_lines.append("snippet:\n" + snippet)
+            if artifact_rel:
+                injected_lines.append(f"full_output_saved_to: {artifact_rel}")
+            injected = "\n".join(injected_lines)
+            
+            # Record tool usage for token tracking
+            try:
+                from ..core import get_token_account
+                get_token_account().record_tool_usage(
                     tool_name=tool_name,
                     action=action,
-                    params=params,
+                    output_chars=raw_bytes_len,
+                    injected_chars=len(injected),
                     success=result.success,
-                    result_summary=result_summary,
-                    error=result.error if not result.success else None,
                 )
-                        # Format result
-            if result.success:
-                if result.data:
-                    return f"Success: {result.data}\n{json.dumps(result.model_dump(exclude={'success', 'error', 'data'}), indent=2)}"
-                return f"Success\n{json.dumps(result.model_dump(exclude={'success', 'error'}), indent=2)}"
-            else:
-                return f"Error: {result.error}"
+            except Exception:
+                pass  # Don't fail on tracking errors
+            
+            # Log to transcript
+            if self.transcript:
+                try:
+                    # Keep backwards-compatible summary event
+                    result_summary = (str(result.data)[:100] if result.data is not None else "")
+                    self.transcript.log_tool_use(
+                        agent_name=self.agent_id,
+                        tool_name=tool_name,
+                        action=action,
+                        params=params,
+                        success=result.success,
+                        result_summary=result_summary,
+                        error=result.error if not result.success else None,
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    if call_id:
+                        duration_ms = int((time.time() - started_at) * 1000)
+                        self.transcript.log_tool_result(
+                            call_id=call_id,
+                            agent_name=self.agent_id,
+                            tool_name=tool_name,
+                            action=action,
+                            success=result.success,
+                            duration_ms=duration_ms,
+                            artifact_path=artifact_rel,
+                            result_snippet=snippet,
+                            error=result.error if not result.success else None,
+                            raw_bytes=raw_bytes_len,
+                            injected_chars=len(injected),
+                        )
+                except Exception:
+                    pass
+
+            return injected
                 
         except Exception as e:
+            # Record failed tool call
             state.tool_calls.append({
                 "tool": tool_name,
                 "action": action,
@@ -889,7 +1158,42 @@ Return ONLY the revised output, no explanation."""
                 "error": str(e),
                 "timestamp": datetime.now().isoformat(),
             })
-            return f"Error executing tool: {e}"
+            
+            # Track failed tool usage too
+            error_msg = f"Error executing tool: {e}"
+            try:
+                from ..core import get_token_account
+                get_token_account().record_tool_usage(
+                    tool_name=tool_name,
+                    action=action,
+                    output_chars=len(error_msg),
+                    injected_chars=len(error_msg),
+                    success=False,
+                )
+            except Exception:
+                pass
+
+            if self.transcript and call_id:
+                try:
+                    duration_ms = int((time.time() - started_at) * 1000)
+                    artifact_rel = self.transcript.save_tool_artifact(call_id=call_id, content=error_msg, suffix=".txt")
+                    self.transcript.log_tool_result(
+                        call_id=call_id,
+                        agent_name=self.agent_id,
+                        tool_name=tool_name,
+                        action=action,
+                        success=False,
+                        duration_ms=duration_ms,
+                        artifact_path=artifact_rel,
+                        result_snippet=error_msg[:800],
+                        error=str(e),
+                        raw_bytes=len(error_msg.encode("utf-8", errors="replace")),
+                        injected_chars=len(error_msg),
+                    )
+                except Exception:
+                    pass
+            
+            return error_msg
     
     async def _consult_colleague(
         self,
@@ -898,6 +1202,7 @@ Return ONLY the revised output, no explanation."""
         state: AgentState,
         project_name: str,
         mode: str = "focused",
+        budget_isolation: bool = True,
     ) -> str:
         """
         Consult a colleague agent with visible output to user.
@@ -911,6 +1216,7 @@ Return ONLY the revised output, no explanation."""
                 - "quick": Brief, direct answer (2-4 sentences). Use for simple questions.
                 - "focused" (default): Targeted expert input (1-2 paragraphs). Standard consultation.
                 - "detailed": Comprehensive response with full reasoning. Use sparingly.
+            budget_isolation: Whether to give colleague its own budget slice (default: True)
         
         Returns:
             Colleague's response string
@@ -964,6 +1270,28 @@ Return ONLY the revised output, no explanation."""
         
         consultation_prefix = mode_guidance.get(mode, mode_guidance["focused"])
         
+        # Set up budget isolation if enabled
+        budget_slice = None
+        if budget_isolation:
+            try:
+                from ..core import get_budget_allocator, get_token_account
+                allocator = get_budget_allocator()
+                account = get_token_account()
+                budget_slice = allocator.create_slice(
+                    parent_agent_id=self.agent_id,
+                    colleague_id=colleague_id,
+                    mode=mode,
+                    purpose=question[:100],
+                    parent_account=account,
+                )
+                
+                # Add budget context to consultation prefix
+                budget_context = budget_slice.get_context_message()
+                if budget_context:
+                    consultation_prefix = f"{consultation_prefix}\n[Your Budget for this Consultation]\n{budget_context}\n\n"
+            except ImportError:
+                pass  # Budget isolation not available
+        
         try:
             # Execute colleague with consultation context prepended
             response = await colleague.execute(
@@ -991,6 +1319,15 @@ Return ONLY the revised output, no explanation."""
                 
         except Exception as e:
             return f"Error consulting colleague: {e}"
+        finally:
+            # Close budget slice
+            if budget_slice is not None:
+                try:
+                    from ..core import get_budget_allocator
+                    allocator = get_budget_allocator()
+                    allocator.close_slice(colleague_id)
+                except Exception:
+                    pass
     
     async def execute_task(
         self,
@@ -1038,8 +1375,13 @@ Return ONLY the revised output, no explanation."""
     def _checkpoint(self, state: AgentState, project_name: str) -> None:
         """Save checkpoint of current state."""
         state.last_checkpoint = datetime.now()
-        
-        checkpoint_dir = Path(f"Sandbox/{project_name}/.checkpoints")
+
+        # Anchor checkpoints under the workspace root to avoid CWD-dependent duplication.
+        workspace_root = getattr(self.context_manager, "workspace_root", None)
+        if workspace_root:
+            checkpoint_dir = Path(workspace_root) / "Sandbox" / project_name / ".checkpoints"
+        else:
+            checkpoint_dir = Path("Sandbox") / project_name / ".checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         checkpoint_path = checkpoint_dir / f"{state.task_id}.json"
@@ -1049,7 +1391,7 @@ Return ONLY the revised output, no explanation."""
         """Get current execution state."""
         return self._current_state
     
-    async def simple_query(self, query: str, context: str = "") -> str:
+    async def simple_query(self, query: str, context: str = "", max_tokens: int | None = None) -> str:
         """
         Simple one-shot query without ReAct loop.
         
@@ -1064,7 +1406,7 @@ Return ONLY the revised output, no explanation."""
         else:
             messages.append({"role": "user", "content": query})
         
-        response = await self.llm.acomplete(messages)
+        response = await self.llm.acomplete(messages, max_tokens=max_tokens)
         
         # Strip any tool call blocks from the response
         return self._clean_tool_blocks(response)

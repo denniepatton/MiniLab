@@ -4,7 +4,7 @@ LLM Response Cache: Hash-based caching for LLM responses.
 Provides:
 - Content-addressable caching using SHA256 hashes
 - SQLite storage for persistence and efficient lookup
-- TTL-based expiration with configurable duration
+- TTL-based expiration with configurable duration (default 1 hour)
 - Token savings tracking for efficiency metrics
 """
 
@@ -56,8 +56,9 @@ class LLMCache:
     _instance: Optional[LLMCache] = None
     _lock = threading.Lock()
     
-    # Default TTL: 24 hours (responses are context-dependent, shouldn't be stale)
-    DEFAULT_TTL = 24 * 60 * 60
+    # Default TTL: 1 hour (aligned with Anthropic prompt cache TTL for agentic workflows)
+    # Tasks typically take >5 min, so 1h TTL provides good value
+    DEFAULT_TTL = 60 * 60  # 1 hour
     
     def __init__(
         self,

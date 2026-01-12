@@ -4,10 +4,11 @@ MiniLab Tools Module
 Typed tool system with Pydantic models for input/output validation.
 All tools integrate with PathGuard for security enforcement.
 
-New in 0.4.0:
-- ToolGateway: Centralized dispatch with permission checking
-- MCP adapters: Integration with Model Context Protocol
-- Skill packs: Tool groupings by domain
+Now includes VS Code-style patterns:
+- PreparedInvocation for two-phase tool execution
+- ResponseStream for typed progress reporting  
+- EditSession/WorkspaceEdit for atomic batched edits
+- ToolSelector for tool enablement control
 """
 
 from .base import Tool, ToolInput, ToolOutput, ToolError
@@ -21,24 +22,51 @@ from .pubmed import PubMedTool
 from .arxiv import ArxivTool
 from .citation import CitationTool
 from .tool_factory import ToolFactory
-from .gateway import (
-    ToolGateway,
-    ToolRegistry,
-    ToolScope,
-    ToolPermission,
-    ToolCall,
-    SkillPack,
-    SKILL_PACKS,
+
+# VS Code-style patterns
+from .prepared_invocation import (
+    PreparedInvocation,
+    ConfirmationLevel,
+    ConfirmationMessage,
+    get_default_confirmation_level,
+    DESTRUCTIVE_ACTIONS,
+    MODIFYING_ACTIONS,
+    READONLY_ACTIONS,
 )
-from .mcp_adapter import (
-    MCPServer,
-    MCPClient,
-    MCPToolAdapter,
-    MCPToolBridge,
-    MCPToolSchema,
-    MCPRequest,
-    MCPResponse,
-    MCPError,
+from .response_stream import (
+    ResponseStream,
+    ConsoleResponseStream,
+    BufferedResponseStream,
+    NullResponseStream,
+    CompositeResponseStream,
+    ProgressKind,
+    DiagnosticSeverity,
+    FileReference,
+    FileTreeNode,
+    CodeBlock,
+    StreamEvent,
+)
+from .edit_session import (
+    EditSession,
+    WorkspaceEdit,
+    TextEdit,
+    FileEdit,
+    FileEditEntry,
+    EditKind,
+    EditState,
+    Position,
+    Range,
+    get_edit_session,
+    create_edit_session,
+    close_edit_session,
+)
+from .tool_selector import (
+    ToolSelector,
+    ToolSelection,
+    ToolPreset,
+    get_tool_selector,
+    set_tool_selector,
+    TOOL_CATEGORIES,
 )
 
 __all__ = [
@@ -58,21 +86,44 @@ __all__ = [
     "ArxivTool",
     "CitationTool",
     "ToolFactory",
-    # Gateway
-    "ToolGateway",
-    "ToolRegistry",
-    "ToolScope",
-    "ToolPermission",
-    "ToolCall",
-    "SkillPack",
-    "SKILL_PACKS",
-    # MCP
-    "MCPServer",
-    "MCPClient",
-    "MCPToolAdapter",
-    "MCPToolBridge",
-    "MCPToolSchema",
-    "MCPRequest",
-    "MCPResponse",
-    "MCPError",
+    # PreparedInvocation (VS Code pattern)
+    "PreparedInvocation",
+    "ConfirmationLevel",
+    "ConfirmationMessage",
+    "get_default_confirmation_level",
+    "DESTRUCTIVE_ACTIONS",
+    "MODIFYING_ACTIONS",
+    "READONLY_ACTIONS",
+    # ResponseStream (VS Code pattern)
+    "ResponseStream",
+    "ConsoleResponseStream",
+    "BufferedResponseStream",
+    "NullResponseStream",
+    "CompositeResponseStream",
+    "ProgressKind",
+    "DiagnosticSeverity",
+    "FileReference",
+    "FileTreeNode",
+    "CodeBlock",
+    "StreamEvent",
+    # EditSession (VS Code pattern)
+    "EditSession",
+    "WorkspaceEdit",
+    "TextEdit",
+    "FileEdit",
+    "FileEditEntry",
+    "EditKind",
+    "EditState",
+    "Position",
+    "Range",
+    "get_edit_session",
+    "create_edit_session",
+    "close_edit_session",
+    # ToolSelector (VS Code pattern)
+    "ToolSelector",
+    "ToolSelection",
+    "ToolPreset",
+    "get_tool_selector",
+    "set_tool_selector",
+    "TOOL_CATEGORIES",
 ]

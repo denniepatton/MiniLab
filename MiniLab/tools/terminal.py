@@ -33,12 +33,43 @@ class TerminalOutput(ToolOutput):
     working_dir: Optional[str] = None
 
 
+# Output truncation limits to prevent token explosion
+# Terminal outputs fed back to LLM can consume massive tokens
+MAX_OUTPUT_CHARS = 8000  # ~2K tokens max for stdout
+MAX_STDERR_CHARS = 2000  # Less for stderr
+TRUNCATION_NOTICE = "\n... [OUTPUT TRUNCATED - {truncated_chars} chars omitted, see terminal for full output] ..."
+
+
+def _truncate_output(text: str, max_chars: int, label: str = "output") -> str:
+    """
+    Truncate output intelligently, preserving head and tail.
+    
+    Strategy: Keep first 60% and last 40% of allowed chars to show
+    both the start (setup, headers) and end (final results, errors).
+    """
+    if not text or len(text) <= max_chars:
+        return text
+    
+    head_chars = int(max_chars * 0.6)
+    tail_chars = int(max_chars * 0.4)
+    truncated = len(text) - max_chars
+    
+    head = text[:head_chars]
+    tail = text[-tail_chars:]
+    notice = TRUNCATION_NOTICE.format(truncated_chars=truncated)
+    
+    return head + notice + tail
+
+
 class TerminalTool(Tool):
     """
     Shell command execution with security enforcement.
     
     Commands are validated against PathGuard before execution.
     Write operations must target Sandbox/.
+    
+    NOTE: Output is truncated to ~8K chars to prevent token explosion
+    when running data analysis scripts with large outputs.
     """
     
     name = "terminal"
@@ -87,9 +118,27 @@ class TerminalTool(Tool):
             if not cwd.is_absolute():
                 cwd = self.workspace_root / cwd
         else:
-            # Default to Sandbox/
-            cwd = self.workspace_root / "Sandbox"
-            cwd.mkdir(exist_ok=True)
+            # Default to workspace root.
+            # IMPORTANT: Defaulting to Sandbox/ causes recursive paths when commands
+            # also reference Sandbox/... (result: Sandbox/Sandbox/...).
+            cwd = self.workspace_root
+
+        # Guardrail: if running from Sandbox/, forbid Sandbox-prefixed paths in the command.
+        try:
+            cwd_resolved = cwd.resolve()
+        except Exception:
+            cwd_resolved = cwd
+        if "Sandbox" in {p for p in cwd_resolved.parts} and "sandbox/" in params.command.lower():
+            return TerminalOutput(
+                success=False,
+                command=params.command,
+                error=(
+                    "Command appears to reference 'Sandbox/...' while the working directory is already Sandbox/. "
+                    "This usually creates recursive paths (Sandbox/Sandbox/...). "
+                    "Fix by removing the 'Sandbox/' prefix in the command, or set working_dir to workspace root."
+                ),
+                working_dir=str(cwd_resolved),
+            )
         
         # Build environment
         import os
@@ -120,11 +169,19 @@ class TerminalTool(Tool):
                     working_dir=str(cwd),
                 )
             
+            # Decode and truncate outputs to prevent token explosion
+            stdout_text = stdout.decode("utf-8", errors="replace")
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            
+            # Truncate large outputs (common with data analysis scripts)
+            stdout_truncated = _truncate_output(stdout_text, MAX_OUTPUT_CHARS, "stdout")
+            stderr_truncated = _truncate_output(stderr_text, MAX_STDERR_CHARS, "stderr")
+            
             return TerminalOutput(
                 success=process.returncode == 0,
                 command=params.command,
-                stdout=stdout.decode("utf-8", errors="replace"),
-                stderr=stderr.decode("utf-8", errors="replace"),
+                stdout=stdout_truncated,
+                stderr=stderr_truncated,
                 return_code=process.returncode,
                 working_dir=str(cwd),
             )

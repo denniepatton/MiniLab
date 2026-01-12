@@ -89,6 +89,31 @@ class WriteupResultsModule(WorkflowModule):
         
         report_format = inputs.get("report_format", "markdown")
         target_audience = inputs.get("target_audience", "technical")
+        report_profile = inputs.get("report_profile", "full_paper")
+
+        # Allow callers to control structure explicitly.
+        requested_sections = inputs.get("report_sections")
+        if isinstance(requested_sections, str):
+            requested_sections = [s.strip() for s in requested_sections.split(",") if s.strip()]
+
+        default_profiles: dict[str, list[str]] = {
+            "methods_only": ["Title", "Methods"],
+            "lit_review": ["Title", "Abstract", "Introduction", "Literature Review", "Conclusion", "References"],
+            "code_summary": ["Title", "Summary", "Implementation Details", "How to Run", "Limitations"],
+            "full_paper": [
+                "Title",
+                "Abstract",
+                "Introduction",
+                "Methods",
+                "Results",
+                "Discussion",
+                "Conclusion",
+                "Figure Legends",
+                "References",
+            ],
+        }
+
+        section_plan = requested_sections if requested_sections else default_profiles.get(str(report_profile), default_profiles["full_paper"])
         
         self._log_step("Starting results write-up")
         
@@ -110,15 +135,11 @@ Analysis Results Summary:
 Target Audience: {target_audience}
 Format: {report_format}
 
-Create a detailed outline with:
-1. Abstract/Executive Summary
-2. Introduction & Background
-3. Methods
-4. Results
-5. Discussion
-6. Conclusions
-7. References
-8. Supplementary Materials
+Report profile: {report_profile}
+Required sections (adapt to context; omit only if clearly irrelevant):
+- """ + "\n- ".join(section_plan) + f"""
+
+Create a detailed outline aligned to the required sections.
 
 For each section, note key points to cover.""",
                 )
@@ -234,6 +255,7 @@ For each figure:
 3. Data to include
 4. Visualization type (line plot, heatmap, etc.)
 5. Key message
+6. **Figure legend** (publication-style: what is shown, cohort/data, axes, statistical annotations, sample sizes)
 
 Also write Python code to generate key figures using matplotlib/seaborn.
 Save the code using code_editor tool.
@@ -271,14 +293,15 @@ Figure Descriptions:
 Project Specification:
 {inputs['project_spec']}
 
-Compile a complete report with:
-1. Title page
-2. Abstract (150-250 words summarizing everything)
-3. Introduction (context and objectives)
-4. All sections above (edited for flow)
-5. Conclusions (key takeaways)
-6. Acknowledgments placeholder
-7. References placeholder
+Report profile: {report_profile}
+Required sections (adapt to context; omit only if clearly irrelevant):
+- """ + "\n- ".join(section_plan) + f"""
+
+Compile a complete report aligned to the required sections.
+
+Figure Legends requirements (if figures are present):
+- Include a dedicated "Figure Legends" section.
+- Use the format: "Figure 1 | Title. Legend..." (one paragraph each).
 
 Format in {report_format}. Ensure smooth transitions between sections.
 Write this as a single cohesive document.""",

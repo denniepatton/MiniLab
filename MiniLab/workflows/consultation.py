@@ -1,11 +1,10 @@
 """
 CONSULTATION Workflow Module.
 
-Initial phase for understanding user goals, clarifying requirements,
-and establishing project scope. Led by Bohr (orchestrator).
+Initial phase for understanding user goals and generating a TaskGraph.
+Bohr creates a DAG of tasks that defines the execution plan.
 
 FAST Design: Minimal LLM calls, direct data exploration.
-Uses structured JSON responses for reliability.
 """
 
 from dataclasses import dataclass
@@ -13,9 +12,9 @@ from typing import Any, Optional
 from pathlib import Path
 import csv
 import json
-import re
 
 from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
+from ..core.task_graph import TaskGraph
 from ..utils import console
 
 
@@ -23,36 +22,28 @@ from ..utils import console
 class ConsultationOutput:
     """Structured output from consultation."""
     project_name: str
-    goals: list[str]
-    constraints: list[str]
-    data_sources: list[str]
-    success_criteria: list[str]
-    clarifications: dict[str, str]
-    recommended_workflow: str
+    task_graph: TaskGraph
+    token_budget: int
+    complexity: float
 
 
 class ConsultationModule(WorkflowModule):
     """
-    CONSULTATION: The ONLY entry point for MiniLab.
+    CONSULTATION: The entry point for MiniLab.
     
-    FAST Design:
-        - Direct file scanning (no agent loops for data exploration)
-        - Single LLM call for analysis + questions
-        - Single user interaction
-        - Single LLM call for spec creation
-    
-    Total: 2 LLM calls instead of 5+ agent loops
+    Produces a TaskGraph that defines the entire execution plan.
+    Bohr analyzes the request and generates a DAG of tasks.
     """
     
     name = "consultation"
-    description = "Initial user consultation to clarify goals and scope"
+    description = "Initial user consultation to clarify goals and create execution plan"
     
     required_inputs = ["user_request"]
-    optional_inputs = ["existing_project", "data_paths"]
-    expected_outputs = ["project_spec", "recommended_workflow", "data_manifest", "token_budget"]
+    optional_inputs = ["existing_project", "data_paths", "scope_confirmation", "scope_response"]
+    expected_outputs = ["task_graph", "project_spec", "token_budget"]
     
     primary_agents = ["bohr"]
-    supporting_agents = ["bayes", "gould"]  # For quick specialist consultations
+    supporting_agents = []
     
     async def execute(
         self,
@@ -60,15 +51,14 @@ class ConsultationModule(WorkflowModule):
         checkpoint: Optional[WorkflowCheckpoint] = None,
     ) -> WorkflowResult:
         """
-        Execute FAST consultation workflow.
+        Execute consultation workflow.
         
         Steps:
         1. Quick direct data scan (NO agent loop)
-        2. Single LLM call: analyze + generate questions
-        3. User interaction
-        4. Single LLM call: create spec
+        2. Bohr analyzes and proposes plan + TaskGraph
+        3. User confirms/adjusts
+        4. Return TaskGraph for orchestrator execution
         """
-        # Validate inputs
         valid, missing = self.validate_inputs(inputs)
         if not valid:
             return WorkflowResult(
@@ -87,184 +77,130 @@ class ConsultationModule(WorkflowModule):
             self._state = {
                 "user_request": user_request,
                 "data_manifest": {},
-                "clarifications": "",
             }
         
         self._log_step(f"Starting consultation: {user_request[:80]}...")
         
         try:
-            # Step 1: FAST direct data scan (no LLM call)
+            # Step 1: Quick data scan (no LLM call)
             if self._current_step <= 0:
                 data_paths = self._extract_data_paths(user_request)
                 self._state["data_manifest"] = self._quick_data_scan(data_paths)
                 self._current_step = 1
                 self.save_checkpoint()
+
+            # Check if Phase 1 understanding already happened (scope_confirmation set)
+            # If so, we skip the REDUNDANT USER PROMPT (step 3) but still do all analysis
+            scope_already_confirmed = inputs.get("scope_confirmation") is not None
             
-            # Step 2: Quick specialist consultations for informed recommendations
+            # Step 2: Bohr analyzes request and proposes plan
             if self._current_step <= 1:
-                manifest_text = self._format_manifest(self._state["data_manifest"])
-                
-                # Get brief statistical guidance from Bayes if data is involved
-                stats_advice = ""
-                if self._state["data_manifest"].get("files"):
-                    bayes = self.agents.get("bayes")
-                    if bayes:
-                        stats_advice = await bayes.simple_query(
-                            query=f"""Given this data structure, what statistical approach would you recommend? ONE paragraph max.
-Data: {manifest_text}
-Request: {user_request[:500]}""",
-                            context="Brief consultation"
-                        )
-                
-                self._state["stats_advice"] = stats_advice
-                self._current_step = 2
-                self.save_checkpoint()
-            
-            # Step 3: Bohr analyzes and proposes an optimal plan (advisory, not hand-holding)
-            if self._current_step <= 2:
                 bohr = self.agents.get("bohr")
                 if not bohr:
                     return WorkflowResult(status=WorkflowStatus.FAILED, error="Bohr agent unavailable")
                 
                 manifest_text = self._format_manifest(self._state["data_manifest"])
-                stats_advice = self._state.get("stats_advice", "")
                 
                 analysis = await bohr.simple_query(
-                    query=f"""Analyze this request and propose an optimal analysis plan.
-
-## User Request:
-{user_request}
-
-## Data Found:
-{manifest_text if manifest_text else "No data files detected."}
-
-{f"## Statistical Guidance (from Bayes):{chr(10)}{stats_advice}" if stats_advice else ""}
-
-## Your Task:
-As an expert orchestrator, propose the OPTIMAL analysis plan for this request. Be advisory and decisive - recommend what YOU think is best.
-
-### Format your response as:
-
-### My Understanding
-[2-3 sentences summarizing what they want]
-
-### Recommended Approach
-[Your expert recommendation for how to tackle this - be specific about methods, scope, and deliverables. This is what you ADVISE, not options to choose from.]
-
-### Recommended Budget
-Based on the complexity of this request, suggest an appropriate token budget:
-- Assess request complexity (narrow vs broad scope, data complexity, literature needs)
-- Recommend ONE specific budget with reasoning
-- Present alternatives ONLY if the user might want different scope
-
-Example: "For this project, I recommend ~300K tokens (~$1.50). This allows for a focused literature review, thorough analysis, and complete writeup. If you want just a quick exploration, 100K would suffice."
-
-### Key Questions (1-2 max, or none)
-Ask ONLY if there's genuine ambiguity that YOU cannot resolve:
-- **Primary Endpoint** - If multiple outcomes exist and it's unclear which matters
-- One domain-specific question ONLY if truly essential
-
-DO NOT ask about:
-- Token budget (you recommend it)
-- Timelines (we execute immediately)
-- Whether they want figures (assume yes)
-- Obvious scope questions (use your judgment)
-- Anything you can reasonably infer or decide yourself
-
-If the user said things like "use your best judgment" or "proceed autonomously", make ALL decisions yourself without questions.""",
+                    query=self._build_consultation_prompt(user_request, manifest_text),
                     context=f"Project: {self.project_path.name}"
                 )
                 
                 self._state["analysis"] = analysis
+                self._current_step = 2
+                self.save_checkpoint()
+            
+            # Step 3: User interaction (SKIP ONLY THE PROMPT if already confirmed in understanding phase)
+            # This does NOT skip team consultation - that happens in planning_committee workflow
+            if self._current_step <= 2:
+                if scope_already_confirmed:
+                    # User already confirmed in understanding phase - no need to ask again
+                    self._state["user_response"] = inputs.get("scope_response", "User confirmed understanding")
+                    # No message here - the flow continues to planning_committee which is the REAL team consultation
+                else:
+                    # Need user interaction
+                    from ..utils import Spinner
+                    was_spinning = Spinner.pause_for_input()
+                    
+                    console.agent_message("BOHR", self._state["analysis"])
+                    print()
+                    try:
+                        user_response = input("  \033[1;32m▶ Your response:\033[0m ").strip()
+                    except (KeyboardInterrupt, EOFError):
+                        user_response = ""
+                    
+                    if was_spinning:
+                        Spinner.resume_after_input()
+                    
+                    self._state["user_response"] = user_response
+                
                 self._current_step = 3
                 self.save_checkpoint()
             
-            # Step 4: User interaction (direct, not via agent)
+            # Step 4: Bohr interprets user response and generates structured plan
+            # This is where the LLM does ALL interpretation - no regex parsing
             if self._current_step <= 3:
-                # Pause spinner for user input
-                from ..utils import Spinner
-                was_spinning = Spinner.pause_for_input()
-                
-                console.agent_message("BOHR", self._state["analysis"])
-                print()
-                try:
-                    user_response = input("  \033[1;32m▶ Your response:\033[0m ").strip()
-                except (KeyboardInterrupt, EOFError):
-                    user_response = ""
-                
-                # Resume spinner
-                if was_spinning:
-                    Spinner.resume_after_input()
-                
-                # Parse token budget from response (or from Bohr's recommendation if user didn't specify)
-                self._state["token_budget"] = self._parse_token_budget(
-                    user_response, 
-                    bohr_analysis=self._state.get("analysis", "")
-                )
-                self._state["clarifications"] = user_response
-                self._current_step = 4
-                self.save_checkpoint()
-            
-            # Step 5: Create spec with JSON structure
-            if self._current_step <= 4:
                 bohr = self.agents.get("bohr")
                 
-                spec = await bohr.simple_query(
-                    query=f"""Create a project specification based on our consultation.
-
-## Original Request
-{user_request}
-
-## Data Available
-{self._format_manifest(self._state["data_manifest"])}
-
-## User's Clarifications
-{self._state["clarifications"]}
-
-## Output Requirements
-Create a detailed project specification with clear sections.
-
-At the END of your response, include a JSON block with workflow recommendation:
-```json
-{{"recommended_workflow": "WORKFLOW_NAME", "goals": ["goal1", "goal2"], "success_criteria": ["criterion1"]}}
-```
-
-Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, explore_dataset
-
-## Create Specification:
-1. **Goals** - What we're accomplishing (be specific)
-2. **Data Sources** - What data we'll use and why
-3. **Approach** - High-level methodology
-4. **Success Criteria** - How we'll know it's done
-5. **Potential Challenges** - Anticipated issues
-""",
-                    context=f"Project: {self.project_path.name}"
+                # Single LLM call to interpret user response AND generate task graph
+                structured_plan = await bohr.simple_query(
+                    query=self._build_interpretation_prompt(
+                        user_request=self._state["user_request"],
+                        bohr_analysis=self._state.get("analysis", ""),
+                        user_response=self._state.get("user_response", ""),
+                        data_manifest=self._state.get("data_manifest", {}),
+                    ),
+                    context="Interpret user response and generate execution plan"
                 )
                 
-                self._state["project_spec"] = spec
-                self._current_step = 5
-            
-            # Extract workflow recommendation from JSON in response
-            recommended = self._extract_workflow_json(self._state["project_spec"])
+                # Extract structured data from Bohr's response
+                plan_data = self._extract_json_from_response(structured_plan)
+                
+                # CRITICAL VALIDATION: Project name must match session project
+                # This prevents consultation from proposing a different project
+                proposed_project = plan_data.get("project_name", "").strip()
+                actual_project = self.project_path.name
+                
+                if proposed_project and proposed_project != actual_project:
+                    raise ValueError(
+                        f"Consultation proposed different project name '{proposed_project}' "
+                        f"but approved project is '{actual_project}'. "
+                        f"This indicates a critical logic error. Aborting to prevent fragmentation."
+                    )
+                
+                # Create TaskGraph from Bohr's interpretation
+                task_graph = TaskGraph.from_bohr_plan(plan_data, self.project_path.name)
+                self._state["task_graph"] = task_graph.to_dict()
+                self._state["token_budget"] = plan_data.get("token_budget", 300_000)
+                
+                # Save TaskGraph to project
+                task_graph.save(self.project_path / "task_graph.json")
+                
+                self._current_step = 4
             
             # Write outputs
             self._write_outputs()
             
             self._status = WorkflowStatus.COMPLETED
             
+            # Reconstruct TaskGraph from state
+            task_graph = TaskGraph.from_dict(self._state["task_graph"])
+            
             return WorkflowResult(
                 status=WorkflowStatus.COMPLETED,
                 outputs={
-                    "project_spec": self._state["project_spec"],
-                    "recommended_workflow": recommended,
+                    "task_graph": task_graph,
+                    "project_spec": self._state.get("analysis", ""),
                     "data_manifest": self._state["data_manifest"],
                     "token_budget": self._state.get("token_budget"),
-                    # Pass user's natural language preferences as context for downstream agents
-                    # This enables fluid, contextual autonomy - not hardcoded levels
-                    "user_preferences": self._state.get("clarifications", ""),
+                    "user_preferences": self._state.get("user_response", ""),
+                    "complexity": self._estimate_complexity(user_request),
                 },
-                artifacts=[str(self.project_path / "project_specification.md")],
-                summary=f"Consultation complete. Recommended: {recommended}",
+                artifacts=[
+                    str(self.project_path / "project_specification.md"),
+                    str(self.project_path / "task_graph.json"),
+                ],
+                summary=f"Consultation complete. Created task graph with {task_graph.get_progress()['total_tasks']} tasks.",
             )
             
         except Exception as e:
@@ -272,21 +208,175 @@ Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, exp
             self._log_step(f"Error: {e}")
             return WorkflowResult(status=WorkflowStatus.FAILED, error=str(e))
     
-    def _extract_data_paths(self, request: str) -> list[Path]:
-        """Extract data paths from request."""
-        paths = []
-        workspace_root = self.project_path.parent.parent  # Sandbox parent
+    def _build_consultation_prompt(self, user_request: str, manifest_text: str) -> str:
+        """Build the consultation prompt for Bohr."""
+        return f"""Analyze this request and propose an optimal analysis plan.
+
+## User Request
+{user_request}
+
+## Data Found
+{manifest_text if manifest_text else "No data files detected."}
+
+## Your Task
+As the project orchestrator, propose what needs to be done. Be decisive and advisory.
+
+### Format your response as:
+
+### My Understanding
+Summarize what the user wants in 2-3 sentences.
+
+### Recommended Approach
+Your expert recommendation for how to tackle this. Be specific about:
+- What tasks need to be done and in what order
+- Which agent should handle each task
+- What the deliverables will be
+
+### Recommended Budget
+Suggest ONE specific token budget (as an integer) with brief reasoning. Example:
+"I recommend 300000 tokens for this project. This allows for thorough analysis and complete documentation."
+
+### Questions (only if truly necessary)
+Ask only if there's genuine ambiguity you cannot resolve yourself. If the user said "use your best judgment" or similar, make all decisions yourself."""
+
+    def _build_interpretation_prompt(
+        self, 
+        user_request: str, 
+        bohr_analysis: str, 
+        user_response: str,
+        data_manifest: dict[str, Any],
+    ) -> str:
+        """
+        Build prompt for Bohr to interpret user response and generate structured plan.
         
-        for pattern in [r'ReadData/[\w/\-\.]+', r'Sandbox/[\w/\-\.]+']:
-            for match in re.findall(pattern, request):
-                full_path = workspace_root / match
-                if full_path.exists():
-                    paths.append(full_path)
+        This is the key method - Bohr interprets ALL user input (budget, preferences, etc.)
+        and returns a structured JSON plan. No regex parsing of user input.
+        """
+        manifest_summary = self._format_manifest(data_manifest) if data_manifest else "No data files"
+        
+        return f"""You previously proposed an analysis plan and the user has responded. 
+Your job is to interpret their response and create a final execution plan.
+
+## Original User Request
+{user_request}
+
+## Your Previous Analysis
+{bohr_analysis}
+
+## User's Response
+{user_response if user_response else "The user accepted your plan without modifications."}
+
+## Available Data
+{manifest_summary}
+
+## Your Task
+Interpret the user's response to understand:
+1. What token budget they want (interpret naturally - "1 million", "1,000,000", "1M", "500k" all mean the same thing)
+2. Any modifications to your proposed plan
+3. Any preferences they expressed
+
+Then create a complete task execution plan.
+
+## CRITICAL: Return ONLY a JSON object with this exact structure:
+
+```json
+{{
+  "token_budget": <integer - the token budget as a plain number, e.g. 1000000 for "1 million">,
+  "user_preferences": "<string summarizing what the user wants>",
+  "tasks": [
+    {{
+      "id": "<snake_case_id>",
+      "name": "<Human Readable Name>",
+      "description": "<What this task accomplishes>",
+      "owner": "<agent_id: bohr|gould|farber|feynman|shannon|greider|dayhoff|hinton|bayes>",
+      "dependencies": ["<id of tasks that must complete first>"],
+      "estimated_tokens": <integer estimate>
+    }}
+  ]
+}}
+```
+
+## Agent Reference
+- bohr: Project coordination, high-level decisions
+- gould: Writing, documentation, literature review
+- farber: Medical/clinical interpretation
+- feynman: Physics, mathematical modeling
+- shannon: Information theory, data analysis
+- greider: Molecular biology, genomics
+- dayhoff: Bioinformatics, sequence analysis
+- hinton: Machine learning, statistical modeling
+- bayes: Statistical analysis, Bayesian methods
+
+## Guidelines
+- Token budget should be the integer the user specified (interpret their natural language)
+- If user didn't specify budget, use your recommended budget from the analysis
+- Task estimated_tokens should sum to approximately the total budget
+- Start with tasks that have no dependencies
+- Include a final documentation/writeup task
+- Be generous with token estimates - it's better to have budget left over than run out"""
+
+    def _extract_json_from_response(self, response: str) -> dict[str, Any]:
+        """
+        Extract JSON from Bohr's response using shared utility.
+        
+        All interpretation of user intent has already been done by Bohr.
+        This just extracts the structured JSON from the response.
+        """
+        from ..utils import extract_json_from_text
+        
+        # Default fallback structure
+        default = {
+            "token_budget": 300_000,
+            "user_preferences": "",
+            "tasks": [
+                {"id": "data_exploration", "name": "Data Exploration", "description": "Explore the data", "owner": "hinton", "dependencies": [], "estimated_tokens": 50000},
+                {"id": "analysis", "name": "Core Analysis", "description": "Perform analysis", "owner": "hinton", "dependencies": ["data_exploration"], "estimated_tokens": 150000},
+                {"id": "documentation", "name": "Documentation", "description": "Write up results", "owner": "gould", "dependencies": ["analysis"], "estimated_tokens": 100000},
+            ]
+        }
+        
+        return extract_json_from_text(response, fallback=default)
+
+    def _estimate_complexity(self, user_request: str) -> float:
+        """Simple complexity estimate - this could also be done by LLM if needed."""
+        # This is acceptable as simple heuristic, not parsing user intent
+        length = len(user_request)
+        if length < 100:
+            return 0.3
+        elif length < 300:
+            return 0.5
+        elif length < 600:
+            return 0.7
+        else:
+            return 0.8
+
+    def _extract_data_paths(self, request: str) -> list[Path]:
+        """Extract data paths mentioned in request."""
+        paths: list[Path] = []
+        workspace_root = self.project_path.parent.parent
+        
+        # Check common data directories
+        for data_dir in ["ReadData", "Data", "data"]:
+            data_path = workspace_root / data_dir
+            if data_path.exists():
+                # If directory is mentioned or no specific path given, include it
+                if data_dir.lower() in request.lower() or "data" in request.lower():
+                    paths.append(data_path)
+        
+        # Also check for specific subdirectories mentioned
+        for part in request.split():
+            # Clean up the part
+            clean_part = part.strip(".,;:'\"()")
+            if "/" in clean_part:
+                potential_path = workspace_root / clean_part
+                if potential_path.exists():
+                    paths.append(potential_path)
+        
         return paths
     
-    def _quick_data_scan(self, paths: list[Path]) -> dict:
+    def _quick_data_scan(self, paths: list[Path]) -> dict[str, Any]:
         """Quickly scan data files directly."""
-        manifest = {"files": [], "summary": {}}
+        manifest: dict[str, Any] = {"files": [], "summary": {}}
         
         for path in paths:
             items = [path] if path.is_file() else list(path.iterdir())
@@ -300,9 +390,9 @@ Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, exp
         }
         return manifest
     
-    def _scan_file(self, path: Path) -> dict:
+    def _scan_file(self, path: Path) -> dict[str, Any]:
         """Scan a single data file."""
-        info = {"name": path.name, "path": str(path)}
+        info: dict[str, Any] = {"name": path.name, "path": str(path)}
         try:
             with open(path, 'r') as f:
                 delimiter = '\t' if path.suffix == '.tsv' else ','
@@ -315,7 +405,7 @@ Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, exp
             info["error"] = str(e)
         return info
     
-    def _format_manifest(self, manifest: dict) -> str:
+    def _format_manifest(self, manifest: dict[str, Any]) -> str:
         """Format manifest for display."""
         if not manifest.get("files"):
             return ""
@@ -329,101 +419,6 @@ Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, exp
                 lines.append(f"  Columns: {cols}")
         return "\n".join(lines)
     
-    def _parse_token_budget(self, user_response: str, bohr_analysis: str = "") -> Optional[int]:
-        """
-        Parse token budget from user response OR Bohr's recommendation.
-        
-        Priority:
-        1. User's explicit budget specification
-        2. User's keyword (quick, thorough, comprehensive)
-        3. Bohr's recommended budget from analysis
-        4. Default based on implied scope
-        
-        Handles common typos like 'l' for 'k' (e.g., "200l" → "200k").
-        """
-        response_lower = user_response.lower()
-        
-        # Fix common typos: l→k (adjacent on keyboard)
-        response_fixed = re.sub(r'(\d+)[lL]\b', r'\1k', response_lower)
-        
-        # Check for explicit size keywords from user
-        if any(word in response_fixed for word in ['quick', 'fast', 'minimal', '100k']):
-            return 100_000
-        if any(word in response_fixed for word in ['thorough', 'standard', '500k']):
-            return 500_000
-        if any(word in response_fixed for word in ['comprehensive', 'full', 'deep', '1m', '1000k']):
-            return 1_000_000
-        
-        # Check for explicit numbers from user (e.g., "200000 tokens" or "200k" or "200K tokens")
-        number_match = re.search(r'(\d+(?:,\d+)*)\s*[kK]?\s*(?:tokens?)?', response_fixed)
-        if number_match:
-            num_str = number_match.group(1).replace(',', '')
-            num = int(num_str)
-            if 'k' in number_match.group(0).lower():
-                num *= 1000
-            if num >= 50_000:
-                return num
-            elif num > 0 and num < 50_000:
-                console.warning(f"Budget '{num}' seems low. Interpreting as {num}k = {num * 1000:,} tokens.")
-                return num * 1000
-        
-        # If user didn't specify, try to extract Bohr's recommendation
-        if bohr_analysis:
-            bohr_lower = bohr_analysis.lower()
-            # Look for Bohr's specific recommendation (e.g., "~300K", "recommend 500k")
-            bohr_match = re.search(r'recommend[^\d]*(\d+)\s*[kK]', bohr_lower)
-            if bohr_match:
-                bohr_budget = int(bohr_match.group(1)) * 1000
-                console.info(f"Using Bohr's recommended budget: {bohr_budget:,} tokens")
-                return bohr_budget
-            
-            # Look for any specific K value in recommendation section
-            bohr_match = re.search(r'~?(\d+)\s*[kK]\s*tokens?', bohr_lower)
-            if bohr_match:
-                bohr_budget = int(bohr_match.group(1)) * 1000
-                if bohr_budget >= 50_000:
-                    console.info(f"Using Bohr's suggested budget: {bohr_budget:,} tokens")
-                    return bohr_budget
-        
-        # Default based on user's autonomy signals
-        if any(word in response_lower for word in ['best judgment', 'autonomous', 'your discretion', 'proceed']):
-            # User wants us to decide - use moderate budget
-            console.info("User trusts our judgment. Using standard budget: 300K tokens.")
-            return 300_000
-        
-        # Final default
-        console.info("No budget specified. Using standard budget: 300K tokens.")
-        return 300_000
-    
-    def _extract_workflow_json(self, spec: str) -> str:
-        """
-        Extract workflow recommendation from JSON block in spec.
-        
-        Looks for ```json block with recommended_workflow field.
-        Falls back to keyword detection if JSON not found.
-        """
-        # Try to find JSON block
-        json_match = re.search(r'```json\s*(\{[^`]+\})\s*```', spec, re.DOTALL)
-        if json_match:
-            try:
-                data = json.loads(json_match.group(1))
-                workflow = data.get("recommended_workflow", "").lower()
-                if workflow in ["brainstorming", "literature_review", "start_project", "explore_dataset"]:
-                    return workflow
-            except json.JSONDecodeError:
-                pass
-        
-        # Fallback: look for workflow mentions in text
-        spec_lower = spec.lower()
-        if "explore" in spec_lower and "data" in spec_lower:
-            return "explore_dataset"
-        if "literature" in spec_lower or "review" in spec_lower:
-            return "literature_review"
-        if "brainstorm" in spec_lower:
-            return "brainstorming"
-        
-        return "start_project"
-    
     def _write_outputs(self) -> None:
         """Write consultation outputs."""
         self.project_path.mkdir(parents=True, exist_ok=True)
@@ -431,9 +426,9 @@ Valid WORKFLOW_NAME values: brainstorming, literature_review, start_project, exp
         # Write project specification
         with open(self.project_path / "project_specification.md", "w") as f:
             f.write("# Project Specification\n\n")
-            f.write(self._state.get("project_spec", ""))
+            f.write(self._state.get("analysis", ""))
         
-        # Only write data manifest if there are actual data files
+        # Write data manifest if there are data files
         data_manifest = self._state.get("data_manifest", {})
         if data_manifest.get("files"):
             with open(self.project_path / "data_manifest.md", "w") as f:

@@ -92,19 +92,12 @@ class WorkflowModule(ABC):
     primary_agents: list[str] = []
     supporting_agents: list[str] = []
     
-    # Budget allocation is now managed by BudgetManager singleton
-    # These are kept as fallback defaults only
+    # Budget guidance - these are informational hints, not hard limits
+    # Agents self-regulate based on continuous budget visibility
     @classmethod
     def get_budget_allocation(cls, workflow_name: str) -> float:
-        """Get budget allocation from BudgetManager (single source of truth)."""
-        try:
-            from ..config.budget_manager import get_budget_manager
-            wb = get_budget_manager().get_workflow_budget(workflow_name)
-            if wb:
-                return wb.allocation_percent
-        except Exception:
-            pass
-        # Fallback defaults
+        """Get suggested budget allocation percentage (guidance only)."""
+        # These are soft guidelines - actual usage tracked by BudgetManager
         defaults = {
             "consultation": 0.05,
             "literature_review": 0.20,
@@ -322,23 +315,17 @@ class WorkflowModule(ABC):
         """
         Initialize budget tracking for this workflow.
         
-        Uses the centralized BudgetManager for dynamic allocation.
+        Uses percentage-based guidance (not hard limits).
         """
         try:
             from ..core import get_token_account
-            from ..config.budget_manager import get_budget_manager
             
             account = get_token_account()
             self._workflow_start_tokens = account.total_used
             
-            # Get budget from centralized manager
-            budget_mgr = get_budget_manager()
-            wb = budget_mgr.get_workflow_budget(self.name)
-            if wb:
-                self._workflow_budget = wb.allocated_tokens
-            elif session_budget:
-                # Fallback to percentage-based allocation
-                allocation = self.BUDGET_ALLOCATION.get(self.name, 0.15)
+            # Calculate suggested budget based on session budget
+            if session_budget:
+                allocation = self.get_budget_allocation(self.name)
                 self._workflow_budget = int(session_budget * allocation)
         except ImportError:
             pass
@@ -374,8 +361,9 @@ class WorkflowModule(ABC):
         try:
             from ..config.budget_manager import get_budget_manager
             budget_mgr = get_budget_manager()
-            return budget_mgr.get_workflow_guidance(self.name)
-        except ImportError:
+            ctx = budget_mgr.get_context()
+            return ctx.to_prompt_text()
+        except Exception:
             pass
         
         # Fallback to simple percentage-based guidance
@@ -502,13 +490,40 @@ Begin your work now. When complete, summarize your deliverables."""
                     outputs={"agent_result": result.result},
                     artifacts=artifacts,
                     summary=result.result or "Workflow completed",
+                    metadata={
+                        **({"stop_reason": result.stop_reason} if getattr(result, "stop_reason", None) else {}),
+                    },
                 )
-            else:
+
+            # Budget exhaustion is a controlled stop: preserve partial progress and allow resume.
+            if result.status.value == "budget_exhausted":
                 return WorkflowResult(
-                    status=WorkflowStatus.FAILED,
-                    error=result.error or "Autonomous execution did not complete",
-                    summary=result.result or "",
+                    status=WorkflowStatus.PAUSED,
+                    outputs={"agent_result": result.result},
+                    artifacts=artifacts,
+                    summary=result.result or "Paused due to budget exhaustion",
+                    metadata={"stop_reason": getattr(result, "stop_reason", "budget_exceeded")},
                 )
+
+            if result.status.value == "paused":
+                return WorkflowResult(
+                    status=WorkflowStatus.PAUSED,
+                    outputs={"agent_result": result.result},
+                    artifacts=artifacts,
+                    summary=result.result or "Workflow paused",
+                    metadata={
+                        **({"stop_reason": result.stop_reason} if getattr(result, "stop_reason", None) else {}),
+                    },
+                )
+
+            return WorkflowResult(
+                status=WorkflowStatus.FAILED,
+                error=result.error or "Autonomous execution did not complete",
+                summary=result.result or "",
+                metadata={
+                    **({"stop_reason": result.stop_reason} if getattr(result, "stop_reason", None) else {}),
+                },
+            )
         
         except Exception as e:
             self._record_workflow_usage()

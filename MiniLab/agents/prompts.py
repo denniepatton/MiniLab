@@ -29,42 +29,43 @@ All outputs MUST go in the project folder: `Sandbox/{project_name}/`
 
 ```
 {project_name}/
-├── project_specification.md    # Created during consultation
-├── data_manifest.md           # Summary of input data
-├── literature/                # Literature review outputs
-│   ├── references.md          # Bibliography (single living document)
-│   └── literature_summary.md  # Narrative summary (may include methodology notes)
-├── analysis/                  # Analysis scripts and notebooks
-│   ├── exploratory/          # EDA outputs
-│   └── modeling/             # Statistical models
-├── figures/                   # All generated figures
-│   └── fig_*.png             # Named descriptively
-├── outputs/                   # Final deliverables
-│   ├── summary_report.md     # Main findings
-│   └── tables/               # Result tables
-└── checkpoints/              # Workflow state (internal use)
+├── project_specification.md    # [ALWAYS] Created during consultation - project goals and scope
+├── literature/                 # [IF literature_review] Only created when lit review runs
+│   ├── references.md          # Single bibliography
+│   └── literature_summary.md  # Narrative summary
+├── analysis/                   # [IF execute_analysis] Only for analysis workflows
+│   └── *.py                   # Analysis scripts
+├── figures/                    # [IF execute_analysis] Generated visualizations
+├── outputs/                    # [IF writeup_results] Final deliverables
+│   └── summary_report.md      # Main findings
+└── checkpoints/                # [ALWAYS] Internal workflow state
 ```
 
-CRITICAL RULES:
-1. Never create folders directly in Sandbox/ - always use the project subfolder.
-2. When writing files, use paths like: `Sandbox/{project_name}/literature/references.md`
-3. **SINGLE LIVING DOCUMENTS**: Do NOT create part1.md, part2.md, etc. Instead, UPDATE or APPEND to existing documents.
-4. Intermediate/working files should be minimal - consolidate into final outputs.
-5. No separate logs/ folder needed - use transcript system.
+## CANONICAL DOCUMENTS (What MUST vs MAY be created)
 
-## FILES YOU SHOULD NOT CREATE
+### ALWAYS Created (by system/orchestrator):
+- `project_specification.md` - Project goals, scope, decisions from consultation
+- `session_summary.md` - End-of-session summary (orchestrator creates this)
+- `checkpoints/` - Workflow state for resumption
 
-The following files are managed by the system and should NOT be created by agents:
-- `session_summary.md` - Created by orchestrator only
-- `data_manifest.md` - Created by system only (and only if data exists)
+### CONDITIONALLY Created (only if workflow runs):
+- `literature/references.md` - Only if literature review workflow runs
+- `literature/literature_summary.md` - Only if literature review workflow runs  
+- `analysis/*.py` - Only if execute_analysis workflow runs
+- `figures/*.png` - Only if analysis produces visualizations
+- `outputs/summary_report.md` - Only if writeup_results workflow runs
+- `data_manifest.md` - Only if input data exists in ReadData/
+
+### NEVER Create These (system-managed or deprecated):
 - `executive_summary.md` - Use literature_summary.md instead
 - `brief_bibliography.md` - Use references.md instead
-- `search_summary.md` / `literature_search_summary.md` - Goes in transcript, not files
+- `search_summary.md` - Goes in transcript, not files
 
-Focus on the canonical outputs:
-- `literature/references.md` - Single bibliography file
-- `literature/literature_summary.md` - Single literature review
-- `outputs/summary_report.md` - Final summary (if doing full analysis)
+## CRITICAL RULES:
+1. Never create folders directly in Sandbox/ - always use the project subfolder
+2. **SINGLE LIVING DOCUMENTS**: Do NOT create part1.md, part2.md. UPDATE existing files.
+3. Only create documents appropriate for the current workflow
+4. If unsure whether to create a document, don't - consolidate into canonical outputs
 
 ## Agent Signatures
 
@@ -127,6 +128,8 @@ class AgentPrompt:
         tools_documentation: str = "",
         session_date: Optional[str] = None,
         budget_context: Optional[str] = None,
+        budget_history_context: Optional[str] = None,
+        tool_usage_context: Optional[str] = None,
     ) -> str:
         """
         Format the complete system prompt for the agent.
@@ -135,6 +138,8 @@ class AgentPrompt:
             tools_documentation: Documentation for available tools
             session_date: Current session date string (e.g., "December 22, 2025")
             budget_context: Optional budget status string to inject (e.g., "60% of budget used")
+            budget_history_context: Optional historical budget data from BudgetHistory
+            tool_usage_context: Optional current session tool usage stats
             
         Returns:
             Complete system prompt string
@@ -244,6 +249,60 @@ Use this information to calibrate your work:
 - **50-75% used**: Prioritize core deliverables, skip nice-to-haves
 - **>75% used**: Focus on completing essential work, be concise
 - **>90% used**: Wrap up current task, provide actionable summary
+""")
+        
+        # Historical budget data - helps agents plan realistically
+        if budget_history_context:
+            sections.append(f"""## BUDGET HISTORY (LIVING DATA)
+
+{budget_history_context}
+
+**USE THIS DATA** to estimate tokens for planned work:
+- Compare your task to historical similar tasks
+- Adjust for complexity: simple tasks use ~70% of mean, complex tasks use ~130%
+- If no history exists for a workflow type, be conservative (assume 1.3x your estimate)
+- This data updates after every run - estimates improve over time
+""")
+        
+        # Current session tool usage - helps agents optimize tool choices
+        if tool_usage_context:
+            sections.append(f"""## CURRENT SESSION TOOL USAGE
+
+{tool_usage_context}
+
+**OPTIMIZE YOUR TOOL USAGE** based on this data:
+- Tools with high token counts consume budget fast (their output becomes LLM input)
+- Prefer piping large outputs through `head`, `tail`, `grep`, or `wc -l`
+- Redirect verbose command output to files rather than capturing in responses
+- Consider if a tool output is truly needed or if you can infer the answer
+""")
+        
+        # Add cognitive mode guidance - divergent vs convergent thinking
+        sections.append("""## COGNITIVE MODES: Divergent vs Convergent
+
+You have TWO cognitive modes available. Choose implicitly based on your task:
+
+### DIVERGENT MODE (Exploration)
+Use when: literature review, hypothesis generation, brainstorming, early-stage planning
+- Generate multiple possibilities before narrowing
+- Ask "what if" and "why not" freely  
+- Explore tangential ideas that might be valuable
+- Seek diverse perspectives from colleagues
+- Breadth over depth initially
+
+### CONVERGENT MODE (Execution)
+Use when: writing code, statistical analysis, document finalization, testing, verification
+- Focus on concrete deliverables
+- Make decisive choices and commit
+- Verify correctness before moving on
+- Be concise and precise in output
+- Depth over breadth
+
+### Mode Selection (apply implicitly)
+**Favor divergent** when task is open-ended, problem poorly defined, or user asks for "ideas/options"
+**Favor convergent** when task has clear deliverables, budget is tight (>70%), or user asks for "implementation/final"
+
+You choose your mode based on context - no explicit switch required.
 """)
         
         # Add flexibility guidance - agents have autonomy

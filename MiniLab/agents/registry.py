@@ -161,10 +161,23 @@ class AgentRegistry:
         # Format session date for prompt
         session_date_str = self.session_date.strftime("%B %d, %Y")
         
-        # Build full system prompt with session date
+        # Get budget history context for agent planning
+        budget_history_context = None
+        tool_usage_context = None
+        try:
+            from ..config.budget_history import get_budget_history
+            bh = get_budget_history()
+            budget_history_context = bh.get_context_for_agents()
+            tool_usage_context = bh.get_tool_usage_context()
+        except Exception:
+            pass
+        
+        # Build full system prompt with session date, budget history, and tool usage
         system_prompt = prompt.format_system_prompt(
             tools_documentation=tools_doc,
             session_date=session_date_str,
+            budget_history_context=budget_history_context,
+            tool_usage_context=tool_usage_context,
         )
         
         # Create LLM backend with agent_id for token tracking

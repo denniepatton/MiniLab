@@ -6,6 +6,11 @@ Mirrors VSCode-style architecture where:
 - Agents provide content but don't create arbitrary files
 - All dates come from the system, never the LLM
 - Duplicate/redundant files are prevented
+
+Canonical Document Philosophy:
+- ALWAYS created: project_specification.md, session_summary.md, checkpoints/
+- CONDITIONALLY created: literature/, analysis/, figures/, outputs/ (only if workflow runs)
+- NEVER created: executive_summary.md, brief_bibliography.md, etc.
 """
 
 from __future__ import annotations
@@ -28,39 +33,39 @@ class ProjectWriter:
     - No duplicate/redundant files
     - Proper metadata in all documents
     
-    Usage:
-        writer = ProjectWriter(project_path, project_name)
-        
-        # Write structured outputs
-        writer.write_literature_summary(content)
-        writer.write_bibliography(entries)
-        writer.write_session_summary(summary)
-        
-        # Agents should NOT create:
-        # - executive_summary.md (use literature_summary.md)
-        # - brief_bibliography.md (use references.md)
-        # - search_summary.md (goes in transcript)
-        # - session_summary.md (orchestrator writes this)
+    Canonical Document Rules:
+    - ALWAYS: project_specification.md (consultation), session_summary.md (orchestrator)
+    - CONDITIONAL: literature/* (only if lit review), analysis/* (only if analysis)
+    - FORBIDDEN: Files that duplicate canonical outputs
     """
     
-    # Canonical project structure
-    STRUCTURE = {
+    # Canonical project structure - maps file pattern to creating workflow
+    # ALWAYS created regardless of workflow:
+    ALWAYS_FILES = {
         "project_specification.md": "consultation",
+        "checkpoints/": "system",
+    }
+    
+    # CONDITIONALLY created based on workflow:
+    CONDITIONAL_FILES = {
         "literature/references.md": "literature_review",
         "literature/literature_summary.md": "literature_review",
         "analysis/": "execute_analysis",
         "figures/": "execute_analysis",
         "outputs/summary_report.md": "writeup_results",
+        "data_manifest.md": "system",  # Only if data exists
     }
     
-    # Files that should NOT be created by agents
+    # Combined for backward compatibility
+    STRUCTURE = {**ALWAYS_FILES, **CONDITIONAL_FILES}
+    
+    # Files that should NEVER be created by agents (use canonical versions instead)
     FORBIDDEN_FILES = [
-        "executive_summary.md",
-        "brief_bibliography.md",
-        "search_summary.md", 
+        "executive_summary.md",      # Use literature_summary.md
+        "brief_bibliography.md",     # Use references.md
+        "search_summary.md",         # Goes in transcript
         "literature_search_summary.md",
-        "session_summary.md",  # Only orchestrator creates this
-        "data_manifest.md",    # Only created if data exists
+        "session_summary.md",        # Only orchestrator creates this
     ]
     
     def __init__(
@@ -222,6 +227,49 @@ class ProjectWriter:
         self._maybe_index(filepath)
         return filepath
     
+    def write_literature_review_pdf(self, markdown_content: str, output_name: str = "literature_review.pdf") -> Optional[Path]:
+        """
+        Generate Nature-formatted PDF of literature review.
+        
+        This is MANDATORY for literature review outputs - no fallbacks.
+        
+        Args:
+            markdown_content: The markdown content of the literature review
+            output_name: Name of PDF file (relative to literature/)
+            
+        Returns:
+            Path to generated PDF, or None if generation fails with error
+            
+        Raises:
+            RuntimeError: If reportlab is not installed
+        """
+        from MiniLab.formats import NatureFormatter
+        
+        lit_dir = self.project_path / "literature"
+        lit_dir.mkdir(parents=True, exist_ok=True)
+        output_path = lit_dir / output_name
+        
+        formatter = NatureFormatter()
+        
+        # Parse markdown to Nature format
+        parsed = formatter.parse_markdown_to_nature(markdown_content)
+        
+        # Validate document structure
+        issues = formatter.validate_document_structure(parsed)
+        if issues:
+            # Log issues but continue (critical review should have caught these)
+            print(f"Warning: Literature review has structural issues: {issues}")
+        
+        # Generate PDF (raises RuntimeError if reportlab unavailable)
+        formatter.generate_pdf(
+            parsed, 
+            output_path,
+            title=f"Literature Review: {self.project_name}"
+        )
+        
+        self._created_files.append(str(output_path))
+        return output_path
+    
     def write_session_summary(
         self, 
         summary: str,
@@ -319,6 +367,54 @@ class ProjectWriter:
         self._created_files.append(str(filepath))
         self._maybe_index(filepath)
         return filepath
+
+    def write_summary_report_pdf(self, *, markdown_path: Optional[Path] = None) -> Optional[Path]:
+        """Generate a PDF version of the canonical summary report.
+
+        Returns None if PDF generation is unavailable.
+        """
+        try:
+            from .pdf import PdfMetadata, markdown_file_to_pdf
+        except Exception:
+            return None
+
+        md_path = Path(markdown_path) if markdown_path else (self.project_path / "outputs" / "summary_report.md")
+        if not md_path.exists():
+            return None
+
+        pdf_path = md_path.with_suffix(".pdf")
+        try:
+            meta = PdfMetadata(
+                title="Summary Report",
+                project=self.project_name,
+                date=self.date_string,
+                generated_by="MiniLab",
+            )
+            out = markdown_file_to_pdf(markdown_path=md_path, output_path=pdf_path, meta=meta)
+            self._created_files.append(str(out))
+            return out
+        except Exception:
+            return None
+
+    def write_task_graph_visuals(self, *, task_graph: Any, render_png: bool = True) -> dict[str, Path]:
+        """Write TaskGraph DOT (and optionally PNG) into checkpoints/.
+
+        This is used by the orchestrator so users always get a visual plan artifact.
+        """
+        try:
+            from .task_graph import export_task_graph_visuals
+        except Exception:
+            return {}
+
+        out_dir = self.project_path / "checkpoints"
+        try:
+            artifacts = export_task_graph_visuals(task_graph, out_dir=out_dir, render_png=render_png)
+        except Exception:
+            return {}
+
+        for p in artifacts.values():
+            self._created_files.append(str(p))
+        return artifacts
     
     def append_to_file(self, relative_path: str, content: str) -> Path:
         """

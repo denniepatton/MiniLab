@@ -139,9 +139,9 @@ class LiteratureReviewModule(WorkflowModule):
                 budget_context = ""
                 if self._state.get("token_budget"):
                     # Calculate workflow-specific budget dynamically
-                    workflow_budget = int(self._state['token_budget'] * self.BUDGET_ALLOCATION.get(self.name, 0.20))
+                    workflow_budget = int(self._state['token_budget'] * self.get_budget_allocation(self.name))
                     budget_context = f"""
-BUDGET CONTEXT: This workflow has ~{workflow_budget:,} tokens allocated ({int(self.BUDGET_ALLOCATION.get(self.name, 0.20) * 100)}% of session budget).
+BUDGET CONTEXT: This workflow has ~{workflow_budget:,} tokens allocated ({int(self.get_budget_allocation(self.name) * 100)}% of session budget).
 Use your judgment to scale scope appropriately:
 - Narrow, well-defined topics: fewer searches, focused results
 - Broad, interdisciplinary topics: more comprehensive coverage
@@ -339,6 +339,88 @@ Sort by relevance to our research topic, not alphabetically.""",
                 self._state["bibliography"] = bib_result.get("response", "")
                 self._current_step = 6
             
+            # MANDATORY Step 7: Critical Review for Narrative Polish
+            # Farber checks: is this comprehensive? Is it a coherent narrative? Any gaps?
+            if self._current_step <= 6:
+                console.info("Conducting critical review for publication readiness...")
+                
+                review_request = f"""CRITICAL REVIEW - Please evaluate the literature summary for publication readiness.
+
+Literature Summary (draft):
+{self._state.get('literature_summary', '')}
+
+References:
+{self._state.get('bibliography', '')}
+
+Evaluate this summary using these criteria:
+1. COMPREHENSIVENESS: Does it cover the essential literature? Are there major gaps?
+2. NARRATIVE: Is it written as a coherent narrative (NOT bullet points)? Does it flow logically?
+3. CLARITY: Is technical jargon explained? Would a scientist in the field understand it?
+4. CITATIONS: Are all citations properly integrated and formatted?
+5. AUTHORITY: Does it demonstrate deep knowledge of the field?
+6. GAPS: Are any major topics missing that should be addressed?
+
+Provide SPECIFIC feedback. If you identify gaps or issues, list them clearly.
+
+Output format:
+READINESS: [PASS/NEEDS_WORK]
+[If NEEDS_WORK, provide specific gaps to fill in, sections to expand, narrative issues to fix]
+[If PASS, confirm it meets publication standards]"""
+                
+                review_result = await self._run_agent_task(
+                    agent_name="farber",
+                    task=review_request,
+                )
+                
+                review_response = review_result.get("response", "")
+                self._state["review_feedback"] = review_response
+                
+                # If review says NEEDS_WORK, have Gould make improvements
+                if "NEEDS_WORK" in review_response or "needs_work" in review_response.lower():
+                    console.info("Addressing review feedback for final polish...")
+                    
+                    # Extract feedback and have Gould revise
+                    revision_request = f"""REVISE the literature summary to address these specific issues:
+
+{review_response}
+
+Original Summary:
+{self._state.get('literature_summary', '')}
+
+Please revise to:
+1. Address all identified gaps
+2. Improve narrative flow and coherence
+3. Expand sections that are too brief
+4. Ensure proper citation integration
+
+Write the COMPLETE revised summary (not just the changes)."""
+                    
+                    revision_result = await self._run_agent_task(
+                        agent_name="gould",
+                        task=revision_request,
+                    )
+                    
+                    revised_summary = revision_result.get("response", "")
+                    if revised_summary:
+                        self._state["literature_summary"] = revised_summary
+                        console.info("Revision completed - summary has been polished")
+                    
+                    # Re-run review to confirm improvements
+                    re_review_result = await self._run_agent_task(
+                        agent_name="farber",
+                        task=f"""Quick check: Does this revised summary now meet publication standards?
+
+{revised_summary}
+
+Respond with just: PASS or still has issues.""",
+                    )
+                    
+                    re_review_response = re_review_result.get("response", "")
+                    self._state["review_feedback"] = f"Initial feedback:\n{review_response}\n\nRevision completed. Final check: {re_review_response}"
+                
+                self._current_step = 7
+                self.save_checkpoint()
+            
             # Write outputs
             return self._write_outputs(inputs)
             
@@ -350,27 +432,9 @@ Sort by relevance to our research topic, not alphabetically.""",
     
     def _parse_review_plan(self, response: str) -> dict:
         """Parse Gould's review plan from the response."""
-        import json
-        import re
+        from ..utils import extract_json_from_text
         
-        # Try to find JSON block
-        json_match = re.search(r'```json\s*(\{[^`]+\})\s*```', response, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
-        
-        # Try to find raw JSON
-        json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(0))
-            except json.JSONDecodeError:
-                pass
-        
-        # Default plan if parsing fails
-        return {
+        default_plan = {
             "num_search_queries": 3,
             "papers_per_query": 5,
             "include_methodology_analysis": False,
@@ -378,6 +442,8 @@ Sort by relevance to our research topic, not alphabetically.""",
             "search_sources": ["pubmed", "arxiv"],
             "queries": [],
         }
+        
+        return extract_json_from_text(response, fallback=default_plan)
     
     async def _execute_quick_mode(
         self, 
@@ -804,6 +870,27 @@ Group references by source (PubMed, arXiv) and sort by relevance to our research
             f.write(self._state.get("bibliography", ""))
         artifacts.append(str(bib_path))
         
+        # Generate PDF using Nature formatter (MANDATORY - no fallback allowed)
+        # This is a core differentiating feature and must succeed
+        from ..formats import NatureFormatter
+        from ..infrastructure import require_feature
+        
+        # Ensure reportlab is available
+        require_feature("pdf_generation")
+        
+        markdown_content = self._state.get("literature_summary", "")
+        formatter = NatureFormatter()
+        parsed = formatter.parse_markdown_to_nature(markdown_content)
+        
+        pdf_path = output_dir / "literature_review.pdf"
+        formatter.generate_pdf(
+            parsed,
+            pdf_path,
+            title=f"Literature Review: {inputs['research_topic']}"
+        )
+        artifacts.append(str(pdf_path))
+        self._log_step(f"Generated Nature-formatted PDF: {pdf_path}")
+        
         self._status = WorkflowStatus.COMPLETED
         self._log_step("Literature review completed")
         
@@ -822,9 +909,10 @@ Group references by source (PubMed, arXiv) and sort by relevance to our research
                 "literature_summary": self._state.get("literature_summary", ""),
                 "methodology_notes": self._state.get("methodology_notes", ""),
                 "knowledge_gaps": self._state.get("critical_assessment", ""),
+                "pdf_generated": True,
             },
             artifacts=artifacts,
-            summary=f"Literature review complete. {ref_count} references compiled.",
+            summary=f"Literature review complete. {ref_count} references compiled. PDF generated.",
         )
     
     def _write_quick_outputs(self, inputs: dict[str, Any]) -> WorkflowResult:

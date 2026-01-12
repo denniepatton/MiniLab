@@ -11,7 +11,7 @@ Architecture:
 - context/: RAG-based context management with FAISS
 - agents/: Structured role-specific agents with ReAct loops
 - workflows/: Modular workflow components
-- orchestrators/: Bohr orchestrator for workflow coordination
+- orchestrator/: TaskGraph-driven orchestrator for workflow coordination
 
 Quick Start:
     from MiniLab import run_minilab
@@ -28,8 +28,7 @@ __version__ = "0.4.0"
 from .core import TokenAccount, get_token_account, ProjectWriter, BudgetExceededError
 
 # Core exports
-from .orchestrators import BohrOrchestrator, MiniLabSession
-from .orchestrators.bohr_orchestrator import run_minilab
+from .orchestrator import MiniLabOrchestrator, MiniLabSession, BohrOrchestrator, run_minilab
 
 # Security
 from .security import PathGuard
@@ -72,9 +71,9 @@ __all__ = [
     "BudgetExceededError",
     # Main entry point
     "run_minilab",
-    "BohrOrchestrator",
+    "MiniLabOrchestrator",
+    "BohrOrchestrator",  # Backwards-compatible alias
     "MiniLabSession",
-    "MajorWorkflow",
     # Security
     "PathGuard",
     # Context

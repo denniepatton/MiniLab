@@ -1,0 +1,226 @@
+"""PDF output helpers.
+
+MiniLab intentionally keeps PDF generation deterministic and dependency-light.
+We use ReportLab (pure Python) to produce a readable PDF from Markdown-ish text.
+
+This is not a full Markdown renderer; it preserves structure and readability:
+- Headings (#, ##, ###)
+- Bullets (- )
+- Code blocks (```)
+- Paragraphs
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, Optional
+
+
+@dataclass(frozen=True)
+class PdfMetadata:
+    title: str
+    project: str
+    date: str
+    generated_by: str = "MiniLab"
+
+
+def _split_lines(text: str) -> list[str]:
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def _strip_code_fences(line: str) -> str:
+    # ```python -> ```
+    return "```" if line.strip().startswith("```") else line
+
+
+def _iter_blocks(lines: list[str]) -> Iterable[tuple[str, list[str]]]:
+    """Yield blocks of (kind, lines)."""
+    i = 0
+    n = len(lines)
+    in_code = False
+    code_lines: list[str] = []
+
+    para: list[str] = []
+
+    def flush_para():
+        nonlocal para
+        if para:
+            yield ("para", para)
+            para = []
+
+    while i < n:
+        raw = lines[i]
+        line = _strip_code_fences(raw)
+        stripped = line.strip()
+
+        if stripped == "```":
+            if in_code:
+                # end code
+                yield from flush_para()
+                yield ("code", code_lines)
+                code_lines = []
+                in_code = False
+            else:
+                yield from flush_para()
+                in_code = True
+                code_lines = []
+            i += 1
+            continue
+
+        if in_code:
+            code_lines.append(raw.rstrip("\n"))
+            i += 1
+            continue
+
+        if not stripped:
+            yield from flush_para()
+            i += 1
+            continue
+
+        if stripped.startswith("#"):
+            yield from flush_para()
+            yield ("heading", [stripped])
+            i += 1
+            continue
+
+        if stripped.startswith("- "):
+            yield from flush_para()
+            # collect contiguous bullets
+            bullets = [stripped]
+            j = i + 1
+            while j < n:
+                nxt = lines[j].strip()
+                if nxt.startswith("- "):
+                    bullets.append(nxt)
+                    j += 1
+                elif nxt == "":
+                    j += 1
+                    break
+                else:
+                    break
+            yield ("bullets", bullets)
+            i = j
+            continue
+
+        para.append(stripped)
+        i += 1
+
+    if in_code and code_lines:
+        yield from flush_para()
+        yield ("code", code_lines)
+    else:
+        yield from flush_para()
+
+
+def markdown_to_pdf(
+    *,
+    markdown_text: str,
+    output_path: Path,
+    meta: PdfMetadata,
+) -> Path:
+    """Convert Markdown-ish text to a readable PDF.
+
+    Requires: reportlab
+    """
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Preformatted, Spacer, ListFlowable
+        from xml.sax.saxutils import escape
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "PDF generation requires 'reportlab'. Install it (e.g. pip install reportlab)."
+        ) from e
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    styles = getSampleStyleSheet()
+    base = styles["BodyText"]
+
+    h1 = ParagraphStyle("H1", parent=styles["Heading1"], spaceAfter=12)
+    h2 = ParagraphStyle("H2", parent=styles["Heading2"], spaceAfter=10)
+    h3 = ParagraphStyle("H3", parent=styles["Heading3"], spaceAfter=8)
+
+    mono = ParagraphStyle(
+        "Mono",
+        parent=base,
+        fontName="Courier",
+        fontSize=9,
+        leading=11,
+        spaceBefore=6,
+        spaceAfter=6,
+    )
+
+    small = ParagraphStyle(
+        "Small",
+        parent=base,
+        fontSize=9,
+        leading=11,
+        textColor=colors.HexColor("#444444"),
+    )
+
+    doc = SimpleDocTemplate(
+        str(output_path),
+        pagesize=letter,
+        leftMargin=0.9 * inch,
+        rightMargin=0.9 * inch,
+        topMargin=0.9 * inch,
+        bottomMargin=0.9 * inch,
+        title=meta.title,
+        author=meta.generated_by,
+    )
+
+    story: list[Any] = []
+
+    # Header
+    story.append(Paragraph(escape(meta.title), h1))
+    story.append(Paragraph(escape(f"Project: {meta.project}"), small))
+    story.append(Paragraph(escape(f"Date: {meta.date}"), small))
+    story.append(Paragraph(escape(f"Generated by: {meta.generated_by}"), small))
+    story.append(Spacer(1, 0.25 * inch))
+
+    lines = _split_lines(markdown_text)
+    for kind, block in _iter_blocks(lines):
+        if kind == "heading":
+            text = block[0]
+            level = len(text) - len(text.lstrip("#"))
+            title = text.lstrip("#").strip()
+            if level <= 1:
+                story.append(Paragraph(escape(title), h1))
+            elif level == 2:
+                story.append(Paragraph(escape(title), h2))
+            else:
+                story.append(Paragraph(escape(title), h3))
+            story.append(Spacer(1, 0.08 * inch))
+        elif kind == "bullets":
+            items = [Paragraph(escape(b[2:].strip()), base) for b in block]
+            story.append(ListFlowable(items, bulletType="bullet", leftIndent=14))
+            story.append(Spacer(1, 0.08 * inch))
+        elif kind == "code":
+            story.append(Preformatted("\n".join(block), mono))
+        elif kind == "para":
+            story.append(Paragraph(escape(" ".join(block).strip()), base))
+            story.append(Spacer(1, 0.08 * inch))
+
+    doc.build(story)
+    return output_path
+
+
+def markdown_file_to_pdf(
+    *,
+    markdown_path: Path,
+    output_path: Optional[Path] = None,
+    meta: Optional[PdfMetadata] = None,
+) -> Path:
+    markdown_path = Path(markdown_path)
+    output_path = Path(output_path) if output_path else markdown_path.with_suffix(".pdf")
+
+    text = markdown_path.read_text()
+    if meta is None:
+        meta = PdfMetadata(title=markdown_path.stem, project=markdown_path.parent.name, date="")
+
+    return markdown_to_pdf(markdown_text=text, output_path=output_path, meta=meta)

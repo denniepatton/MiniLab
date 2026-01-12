@@ -11,6 +11,11 @@ from pathlib import Path
 import json
 
 from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
+from .plan_dissemination import (
+    format_task_graph_as_plan,
+    extract_agent_responsibilities,
+    build_agent_context,
+)
 from ..utils import console
 
 
@@ -61,7 +66,7 @@ class ExecuteAnalysisModule(WorkflowModule):
     description = "Execute the analysis plan with iterative refinement"
     
     required_inputs = ["analysis_plan", "responsibilities", "data_paths"]
-    optional_inputs = ["max_iterations", "quality_threshold", "code_style"]
+    optional_inputs = ["max_iterations", "quality_threshold", "code_style", "task_graph", "project_spec"]
     expected_outputs = ["analysis_results", "code_artifacts", "data_artifacts", "validation_report"]
     
     primary_agents = ["dayhoff", "hinton", "bayes"]
@@ -97,9 +102,23 @@ class ExecuteAnalysisModule(WorkflowModule):
         else:
             self._status = WorkflowStatus.IN_PROGRESS
             self._current_step = 0
+            
+            # Extract and format task graph for agent context
+            task_graph = inputs.get("task_graph")
+            task_graph_plan = format_task_graph_as_plan(task_graph) if task_graph else ""
+            
+            # Extract agent responsibilities
+            responsibilities = inputs.get("responsibilities", {})
+            if isinstance(responsibilities, str):
+                # If it's a string from planning output, parse it
+                responsibilities = extract_agent_responsibilities(responsibilities, task_graph)
+            
             self._state = {
                 "analysis_plan": inputs["analysis_plan"],
                 "data_paths": inputs["data_paths"],
+                "task_graph_plan": task_graph_plan,
+                "responsibilities": responsibilities,
+                "project_spec": inputs.get("project_spec", ""),
                 "steps": [],
                 "current_iteration": 0,
                 "validation_scores": [],
@@ -146,9 +165,7 @@ Format as a numbered list of steps.""",
             if self._current_step <= 1:
                 self._log_step("Step 2: Data preparation")
                 
-                data_result = await self._run_agent_task(
-                    agent_name="dayhoff",
-                    task=f"""Prepare the data for analysis.
+                data_task = f"""Prepare the data for analysis.
 
 Data Paths:
 {json.dumps(inputs['data_paths'], indent=2)}
@@ -163,12 +180,25 @@ Tasks:
 4. Create train/test splits if needed
 5. Save processed data to Sandbox/
 
+OUTPUT HYGIENE (MANDATORY):
+- Write code ONLY under the project analysis folder (Sandbox/<project>/analysis/)
+- Do NOT create throwaway scripts (no test_*.py, scratch*.py, simple_test.py)
+- Use controlled filenames only: run_analysis.py or NN_step_name.py (e.g., 01_preprocess.py)
+- Prefer editing existing files over creating new ones
+
 Use the filesystem and code_editor tools to:
 - Read the data files
 - Write Python preprocessing scripts
 - Execute and save processed data
 
-Report what data is ready and its structure.""",
+Report what data is ready and its structure."""
+                
+                # Inject plan context for this agent
+                data_task_with_context = self._inject_plan_context("dayhoff", data_task)
+                
+                data_result = await self._run_agent_task(
+                    agent_name="dayhoff",
+                    task=data_task_with_context,
                 )
                 
                 self._state["data_preparation"] = data_result.get("response", "")
@@ -195,6 +225,11 @@ Tasks:
 3. Create derived features if beneficial
 4. Recommend feature selection strategy
 5. Implement feature transformations
+
+OUTPUT HYGIENE (MANDATORY):
+- Implement feature engineering in Sandbox/<project>/analysis/ using controlled filenames only
+- Do NOT create throwaway scripts (no test_*.py, scratch*.py)
+- Prefer updating a single file (e.g., 02_features.py) rather than scattering code
 
 Write code to implement feature engineering.
 Report the final feature set and rationale.""",
@@ -258,6 +293,10 @@ Tasks:
 2. Check for overfitting/underfitting
 3. Evaluate uncertainty quantification
 4. Verify assumptions are met
+
+OUTPUT HYGIENE (MANDATORY):
+- Put any validation code in Sandbox/<project>/analysis/ using controlled filenames only (e.g., 04_validate.py)
+- Do NOT create throwaway scripts (no test_*.py, scratch*.py)
 5. Suggest improvements if needed
 
 Provide a validation score (0-1) and specific feedback.
@@ -416,3 +455,36 @@ This report will accompany the analysis results.""",
                 error=str(e),
                 outputs=self._state,
             )
+    
+    def _inject_plan_context(self, agent_name: str, original_task: str) -> str:
+        """
+        Inject task graph and plan context into an agent's task prompt.
+        
+        This ensures agents have visibility into the full workflow plan
+        and explicit guardrails about outputs, preventing fragmentation.
+        
+        Args:
+            agent_name: Name of the agent
+            original_task: The task prompt
+            
+        Returns:
+            Enhanced task prompt with context
+        """
+        task_graph_plan = self._state.get("task_graph_plan", "")
+        responsibilities = self._state.get("responsibilities", {})
+        project_spec = self._state.get("project_spec", "")
+        
+        if not task_graph_plan:
+            # If no task graph available, just return original task
+            return original_task
+        
+        # Build context for this agent
+        context = build_agent_context(
+            agent_name,
+            task_graph_plan,
+            responsibilities,
+            project_spec,
+        )
+        
+        # Prepend context to task
+        return f"{context}\n\n{'='*70}\nYOUR TASK\n{'='*70}\n\n{original_task}"

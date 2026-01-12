@@ -2,6 +2,7 @@
 Code Editor Tool with PathGuard integration.
 
 Provides code editing capabilities restricted to Sandbox/.
+Supports VS Code-style two-phase execution with prepare/invoke pattern.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from typing import Any, Optional
 from pydantic import Field
 
 from .base import Tool, ToolInput, ToolOutput, ToolError
+from .prepared_invocation import PreparedInvocation, ConfirmationLevel, ConfirmationMessage
+from .edit_session import EditSession, TextEdit, WorkspaceEdit, Position, Range, get_edit_session
 from ..context import ContextManager
 from ..security import PathGuard, AccessDenied
 from ..utils import console
@@ -92,10 +95,17 @@ class CodeEditorTool(Tool):
     Code editing operations with security enforcement.
     
     All write operations are restricted to Sandbox/.
+    Supports VS Code-style two-phase execution (prepare → invoke).
     """
     
     name = "code_editor"
     description = "Create, edit, and run code files (writing restricted to Sandbox/)"
+    
+    # Define which actions are destructive vs modifying vs readonly
+    DESTRUCTIVE_ACTIONS = {"delete_lines"}
+    MODIFYING_ACTIONS = {"create", "insert", "replace", "replace_text"}
+    READONLY_ACTIONS = {"view", "check_syntax"}
+    EXECUTION_ACTIONS = {"run"}
     
     def __init__(
         self,
@@ -104,6 +114,8 @@ class CodeEditorTool(Tool):
         context_manager: Optional[ContextManager] = None,
         auto_index: bool = True,
         max_index_bytes: int = 2_000_000,
+        use_edit_session: bool = False,
+        edit_session_id: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(agent_id, **kwargs)
@@ -112,6 +124,111 @@ class CodeEditorTool(Tool):
         self.context_manager = context_manager
         self.auto_index = auto_index
         self.max_index_bytes = max_index_bytes
+        self.use_edit_session = use_edit_session
+        self.edit_session_id = edit_session_id
+    
+    async def prepare(self, action: str, params: dict[str, Any]) -> PreparedInvocation:
+        """
+        VS Code-style preparation phase before tool execution.
+        
+        Validates parameters, determines confirmation requirements,
+        and estimates token cost without executing.
+        """
+        # Validate params first
+        try:
+            validated = self.validate_input(action, params)
+        except Exception as e:
+            return PreparedInvocation.invalid(str(e))
+        
+        # Check path validity for path-based operations
+        if hasattr(validated, 'path'):
+            try:
+                path = self._resolve_path(validated.path)
+                
+                # Check read access for all operations
+                self.path_guard.validate_read(path, self.agent_id)
+                
+                # Check write access for modifying operations
+                if action in (self.MODIFYING_ACTIONS | self.DESTRUCTIVE_ACTIONS):
+                    self.path_guard.validate_write(path, self.agent_id)
+                    
+            except AccessDenied as e:
+                return PreparedInvocation.invalid(f"Access denied: {e}")
+            except Exception as e:
+                return PreparedInvocation.invalid(f"Path validation failed: {e}")
+        
+        # Determine confirmation level based on action type
+        confirmation = None
+        
+        if action in self.DESTRUCTIVE_ACTIONS:
+            # Destructive actions need explicit confirmation
+            path_str = params.get('path', 'unknown')
+            line_info = ""
+            if hasattr(validated, 'start_line') and hasattr(validated, 'end_line'):
+                line_info = f" (lines {validated.start_line}-{validated.end_line})"
+            
+            confirmation = ConfirmationMessage(
+                level=ConfirmationLevel.DESTRUCTIVE,
+                title=f"Confirm Delete: {path_str}",
+                message=f"Delete lines{line_info} from {path_str}? This cannot be undone.",
+            )
+            
+        elif action in self.EXECUTION_ACTIONS:
+            # Code execution needs confirmation
+            path_str = params.get('path', 'unknown')
+            args_str = " ".join(params.get('args', []))
+            
+            confirmation = ConfirmationMessage(
+                level=ConfirmationLevel.ACTIVE,
+                title=f"Execute Script: {path_str}",
+                message=f"Run {path_str} {args_str}?",
+            )
+            
+        elif action in self.MODIFYING_ACTIONS:
+            # Modifying actions get passive confirmation (shown but not blocking)
+            path_str = params.get('path', 'unknown')
+            
+            confirmation = ConfirmationMessage(
+                level=ConfirmationLevel.PASSIVE,
+                title=f"Modify File: {path_str}",
+                message=f"Will modify {path_str}",
+            )
+        
+        # Estimate token cost (rough heuristics)
+        estimated_tokens = self._estimate_tokens(action, params)
+        
+        return PreparedInvocation.valid(
+            invocation_message=f"code_editor.{action}",
+            confirmation_messages=[confirmation] if confirmation else [],
+            estimated_tokens=estimated_tokens,
+        )
+    
+    def _estimate_tokens(self, action: str, params: dict[str, Any]) -> int:
+        """Estimate token cost for an operation."""
+        base_cost = 50  # Base overhead
+        
+        if action == "view":
+            # Estimate based on line range
+            start = params.get('start_line', 1)
+            end = params.get('end_line', 100)  # Default assumption
+            lines = end - start + 1
+            return base_cost + (lines * 10)  # ~10 tokens per line
+            
+        elif action == "create":
+            content = params.get('content', '')
+            # ~4 characters per token
+            return base_cost + (len(content) // 4)
+            
+        elif action in ("insert", "replace", "replace_text"):
+            content = params.get('content', params.get('replace', ''))
+            return base_cost + (len(content) // 4) + 20
+            
+        elif action == "run":
+            # Execution output can vary wildly
+            return base_cost + 500  # Conservative estimate
+            
+        else:
+            return base_cost
 
     def _infer_project_name(self, path: Path) -> Optional[str]:
         try:
@@ -189,6 +306,14 @@ class CodeEditorTool(Tool):
             p = self.workspace_root / p
         return p.resolve()
     
+    def _get_edit_session(self) -> Optional[EditSession]:
+        """Get the edit session if enabled."""
+        if not self.use_edit_session:
+            return None
+        if self.edit_session_id:
+            return get_edit_session(self.edit_session_id)
+        return None
+    
     async def execute(self, action: str, params: dict[str, Any]) -> CodeOutput:
         """Execute a code editor action."""
         validated = self.validate_input(action, params)
@@ -222,6 +347,23 @@ class CodeEditorTool(Tool):
         path = self._resolve_path(params.path)
         self.path_guard.validate_write(path, self.agent_id)
         
+        # Check if using EditSession for batched operations
+        session = self._get_edit_session()
+        if session:
+            # Stage the edit for later commit
+            workspace_edit = WorkspaceEdit()
+            workspace_edit.create_file(path, params.content)
+            session.stage_edit(workspace_edit, f"Create {params.path}")
+            
+            lines = params.content.count("\n") + 1
+            return CodeOutput(
+                success=True,
+                path=str(path),
+                line_count=lines,
+                data=f"Staged creation of file with {lines} lines (pending commit)"
+            )
+        
+        # Direct execution (original behavior)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(params.content)
 
@@ -272,6 +414,32 @@ class CodeEditorTool(Tool):
         if not path.exists():
             return CodeOutput(success=False, error=f"File not found: {params.path}")
         
+        # Check if using EditSession for batched operations
+        session = self._get_edit_session()
+        if session:
+            # Create a text edit for insertion
+            # Position is at start of the target line (0-indexed internally)
+            position = Position(line=params.line_number - 1, character=0)
+            
+            # Ensure content ends with newline for proper insertion
+            content = params.content
+            if not content.endswith("\n"):
+                content += "\n"
+            
+            text_edit = TextEdit.insert(position, content)
+            
+            workspace_edit = WorkspaceEdit()
+            workspace_edit.replace(path, text_edit.range, text_edit.new_text)
+            session.stage_edit(workspace_edit, f"Insert at line {params.line_number} in {params.path}")
+            
+            new_lines = content.count("\n")
+            return CodeOutput(
+                success=True,
+                path=str(path),
+                data=f"Staged insertion of {new_lines} lines at line {params.line_number} (pending commit)"
+            )
+        
+        # Direct execution (original behavior)
         lines = path.read_text().splitlines(keepends=True)
         insert_idx = params.line_number - 1
         
@@ -299,6 +467,33 @@ class CodeEditorTool(Tool):
         if not path.exists():
             return CodeOutput(success=False, error=f"File not found: {params.path}")
         
+        # Check if using EditSession for batched operations
+        session = self._get_edit_session()
+        if session:
+            # Create a text edit for replacement
+            # Range from start of start_line to end of end_line (0-indexed internally)
+            start_pos = Position(line=params.start_line - 1, character=0)
+            end_pos = Position(line=params.end_line, character=0)  # End of last line to replace
+            edit_range = Range(start=start_pos, end=end_pos)
+            
+            # Ensure content ends with newline
+            content = params.content
+            if not content.endswith("\n"):
+                content += "\n"
+            
+            text_edit = TextEdit.replace(edit_range, content)
+            
+            workspace_edit = WorkspaceEdit()
+            workspace_edit.replace(path, text_edit.range, text_edit.new_text)
+            session.stage_edit(workspace_edit, f"Replace lines {params.start_line}-{params.end_line} in {params.path}")
+            
+            return CodeOutput(
+                success=True,
+                path=str(path),
+                data=f"Staged replacement of lines {params.start_line}-{params.end_line} (pending commit)"
+            )
+        
+        # Direct execution (original behavior)
         lines = path.read_text().splitlines(keepends=True)
         
         start_idx = params.start_line - 1
@@ -328,6 +523,28 @@ class CodeEditorTool(Tool):
         if not path.exists():
             return CodeOutput(success=False, error=f"File not found: {params.path}")
         
+        # Check if using EditSession for batched operations
+        session = self._get_edit_session()
+        if session:
+            # Create a text edit for deletion
+            # Range from start of start_line to start of line after end_line (0-indexed)
+            start_pos = Position(line=params.start_line - 1, character=0)
+            end_pos = Position(line=params.end_line, character=0)  # Start of next line
+            edit_range = Range(start=start_pos, end=end_pos)
+            
+            text_edit = TextEdit.delete(edit_range)
+            
+            workspace_edit = WorkspaceEdit()
+            workspace_edit.delete(path, text_edit.range)
+            session.stage_edit(workspace_edit, f"Delete lines {params.start_line}-{params.end_line} in {params.path}")
+            
+            return CodeOutput(
+                success=True,
+                path=str(path),
+                data=f"Staged deletion of lines {params.start_line}-{params.end_line} (pending commit)"
+            )
+        
+        # Direct execution (original behavior)
         lines = path.read_text().splitlines(keepends=True)
         
         start_idx = params.start_line - 1

@@ -37,6 +37,10 @@ class OpenAIBackend(LLMBackend):
         # Local token tracking
         self._total_input_tokens = 0
         self._total_output_tokens = 0
+        
+        # Project context for resume functionality
+        self._project_context: str = ""
+        self._cached_persona: str = ""
     
     @property
     def token_usage(self) -> dict:
@@ -46,6 +50,25 @@ class OpenAIBackend(LLMBackend):
             "output_tokens": self._total_output_tokens,
             "total_tokens": self._total_input_tokens + self._total_output_tokens,
         }
+    
+    def set_persona(self, persona: str) -> None:
+        """Set the agent's persona/system prompt."""
+        self._cached_persona = persona
+    
+    def append_project_context(self, context: str) -> None:
+        """Append project context for resume functionality."""
+        self._project_context = context
+    
+    def get_full_system_prompt(self, additional_context: str = "") -> str:
+        """Build combined system prompt."""
+        parts = []
+        if self._cached_persona:
+            parts.append(self._cached_persona)
+        if self._project_context:
+            parts.append(f"\n\n## PROJECT CONTEXT\n{self._project_context}")
+        if additional_context:
+            parts.append(f"\n\n{additional_context}")
+        return "".join(parts)
     
     def _update_token_usage(self, usage: dict, operation: str = "llm.complete") -> None:
         """Update token usage from API response - both local and global."""
@@ -61,15 +84,15 @@ class OpenAIBackend(LLMBackend):
             from ..core import get_token_account
             from ..core.token_context import get_workflow, get_trigger
             account = get_token_account()
-            if account._budget is not None:  # Only track if budget set
-                account.debit(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    agent_id=self.agent_id,
-                    operation=operation,
-                    workflow=get_workflow(),
-                    trigger=get_trigger(),
-                )
+            # Always record usage even before a budget is set.
+            account.debit(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                agent_id=self.agent_id,
+                operation=operation,
+                workflow=get_workflow(),
+                trigger=get_trigger(),
+            )
         except Exception:
             pass  # Fail silently if TokenAccount not available
 

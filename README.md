@@ -1,164 +1,324 @@
-# MiniLab
+<p align="center">
+  <h1 align="center">🔬 MiniLab</h1>
+  <p align="center">
+    <strong>Autonomous Multi-Agent Scientific Research Platform</strong>
+  </p>
+  <p align="center">
+    <em>Professional-grade scientific analysis through collaborative AI agents</em>
+  </p>
+</p>
 
-**MiniLab** is a multi-agent scientific research assistant that combines autonomous analysis capabilities with collaborative agent workflows. Inspired by [CellVoyager](https://www.biorxiv.org/content/10.1101/2025.06.03.657517v1) for autonomous biological data analysis, [VirtualLab](https://www.nature.com/articles/s41586-025-09442-9) for multi-agent scientific collaboration, and modern agentic coding paradigms, MiniLab provides an integrated environment for conducting state-of-the-art research workflows.
+<p align="center">
+  <a href="#features">Features</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#quickstart">Quickstart</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#agents">Agents</a> •
+  <a href="#documentation">Documentation</a>
+</p>
+
+---
 
 ## Overview
 
-MiniLab creates a team of specialized AI agents that work together to assist researchers with:
+MiniLab is a multi-agent AI system designed for professional scientific research workflows. It coordinates a team of nine specialized AI agents to perform literature reviews, data analysis, hypothesis generation, and publication-ready document creation—all with full reproducibility and transparent resource usage.
 
-- **Literature Synthesis**: Comprehensive searches across PubMed and arXiv with critical assessment
-- **Data Exploration**: Autonomous exploration and characterization of datasets
-- **Hypothesis Generation**: Multi-agent deliberation to develop and refine research questions
-- **Analysis Execution**: End-to-end implementation from planning through statistical validation
-- **Documentation**: Automated report generation with proper citations and figure legends
+### Key Capabilities
 
-The system employs a ReAct-style execution loop where agents autonomously use tools, consult colleagues, and iterate toward solutions—while maintaining human oversight at key decision points.
+- **Literature Synthesis**: Deep literature reviews with critical analysis and gap identification
+- **Data Analysis**: Exploratory analysis, statistical modeling, and ML pipelines
+- **Hypothesis Generation**: Evidence-based brainstorming grounded in peer-reviewed research
+- **Publication-Ready Outputs**: Nature Journal-formatted PDFs with proper citations and figures
+- **Full Reproducibility**: Complete audit trails, checkpointing, and session resume
 
-## Key Features
+### Design Philosophy
 
-### Multi-Agent Architecture
-- **Nine specialized agents** organized into three guilds (Synthesis, Theory, Implementation)
-- **Cross-agent consultation** with visible dialogue for transparency
-- **Dynamic delegation** based on task requirements and agent expertise
+MiniLab integrates insights from state-of-the-art multi-agent research:
 
-### Intelligent Budget Management
-- **Bayesian learning** from historical token usage to improve allocation accuracy
-- **Continuous complexity estimation** (0.0-1.0 scale) replacing coarse tiers
-- **5% graceful shutdown reserve** ensuring clean completion within budget
-- **Budget-scaled iterations** adjusting agent loop limits based on remaining budget
-- **Self-critique checkpoints** verifying output quality before committing
+- **[CellVoyager](https://www.biorxiv.org/content/10.1101/2025.06.03.657517v1)**: Autonomous biological analysis patterns
+- **[VirtualLab](https://www.biorxiv.org/content/10.1101/2024.11.11.623004v1)**: Multi-agent collaborative research
+- **VS Code Agent Infrastructure**: Hard-coded orchestration with explicit guardrails
 
-### Autonomous Execution
-- **ReAct-style loops** enabling agents to reason, act, and observe iteratively
-- **LLM response caching** (SQLite-backed) reducing redundant API calls
-- **Checkpoint/resume capability** for long-running analyses
-- **Session orchestration** managing full lifecycle from startup to teardown
+---
 
-### Flexible Workflow System
-- **Six composable mini-workflows** that can be combined into larger pipelines
-- **Dynamic token allocation** based on workflow type and estimated complexity
-- **Adaptive modes** responding to project requirements
+## Features
 
-### Security and Safety
-- **PathGuard access control** enforcing read-only data directories and sandboxed outputs
-- **Agent-specific permissions** limiting tool access by role (defined in `team.yaml`)
-- **Audit logging** for all file operations
+### 🤖 Nine Specialized Agents
 
-### User Experience
-- **Narrative-style communication** from the orchestrator (Bohr)
-- **Visible agent consultations** showing inter-agent dialogue
-- **Graceful interruption** with progress saving via Ctrl+C
-- **Comprehensive transcripts** capturing all session activity
+| Agent | Role | Expertise |
+|:------|:-----|:----------|
+| **Bohr** | Project Manager | Planning, synthesis, user communication |
+| **Gould** | Science Writer | Literature review, citations, documentation |
+| **Farber** | Clinical Expert | Experimental design, medical interpretation |
+| **Feynman** | Theoretician | Physics, mathematics, first principles |
+| **Shannon** | Information Theorist | Statistics, signal processing, feature selection |
+| **Greider** | Molecular Biologist | Genetics, cellular mechanisms |
+| **Dayhoff** | Bioinformatician | Sequence analysis, computational biology |
+| **Hinton** | ML Expert | Machine learning, neural networks, modeling |
+| **Bayes** | Statistician | Bayesian inference, uncertainty quantification |
 
-## Architecture
+### 📊 DAG-Based Workflow Execution
+
+MiniLab uses a **TaskGraph** (directed acyclic graph) to coordinate complex, multi-step analyses:
 
 ```
-MiniLab/
-├── agents/                    # Agent system
-│   ├── base.py               # Agent with ReAct loop, self-critique, budget-scaled iterations
-│   ├── prompts.py            # Structured 5-part prompting schema
-│   └── registry.py           # Agent creation and colleague relationships
-├── config/                    # Configuration (separated by concern)
-│   ├── agents.yaml           # Agent personas, communication style, operating principles
-│   ├── team.yaml             # Security: tools, write permissions, shell access
-│   ├── budgets.yaml          # Token budgets per workflow type
-│   ├── loader.py             # YAML configuration loader for agents.yaml
-│   ├── team_loader.py        # YAML configuration loader for team.yaml
-│   ├── budget_manager.py     # Dynamic budget allocation with continuous complexity
-│   └── budget_history.py     # Bayesian learning from historical token usage
-├── context/                   # RAG-based context management
-│   ├── context_manager.py    # Context orchestration with token budgets
-│   ├── embeddings.py         # Sentence-transformers integration
-│   ├── vector_store.py       # FAISS vector store for retrieval
-│   └── state_objects.py      # ProjectState, TaskState definitions
-├── core/                      # Core infrastructure
-│   ├── token_account.py      # Centralized token tracking with threshold warnings
-│   ├── token_context.py      # Token context for budget awareness
-│   └── project_writer.py     # Centralized output management
-├── llm_backends/             # LLM integrations
-│   ├── anthropic_backend.py  # Claude API with prompt caching and cache integration
-│   ├── openai_backend.py     # OpenAI API support
-│   ├── cache.py              # SQLite-backed LLM response caching
-│   └── base.py               # Abstract backend interface
-├── orchestrators/
-│   ├── bohr_orchestrator.py  # Workflow coordination, session management
-│   └── session_orchestrator.py # Session lifecycle management
-├── security/
-│   └── path_guard.py         # File access control and audit logging
-├── storage/
-│   ├── state_store.py        # Persistent state management
-│   └── transcript.py         # Session transcript logging
-├── tools/                    # Typed tool system
-│   ├── base.py               # Tool, ToolInput, ToolOutput base classes
-│   ├── filesystem.py         # File read/write/list operations
-│   ├── code_editor.py        # Code creation and editing
-│   ├── terminal.py           # Shell command execution
-│   ├── environment.py        # Package management
-│   ├── web_search.py         # Tavily web search integration
-│   ├── pubmed.py             # NCBI E-utilities for literature
-│   ├── arxiv.py              # arXiv paper search
-│   ├── citation.py           # Bibliography management
-│   ├── user_input.py         # User interaction tool
-│   └── tool_factory.py       # Agent-specific tool instantiation
-├── utils/
-│   ├── __init__.py           # Console formatting, spinners
-│   └── timing.py             # Performance timing utilities
-└── workflows/                # Modular workflow components
-    ├── base.py               # WorkflowModule abstract base class
-    ├── consultation.py       # User goal clarification (Bohr)
-    ├── literature_review.py  # Background research (Gould)
-    ├── planning_committee.py # Multi-agent deliberation
-    ├── execute_analysis.py   # Implementation loop (Dayhoff→Hinton→Bayes)
-    ├── writeup_results.py    # Documentation (Gould)
-    └── critical_review.py    # Quality assessment (Farber)
+User Request
+     ↓
+Consultation → TaskGraph Generated
+     ↓
+┌────────────────────────────────────────┐
+│         DAG Orchestrator               │
+│  (respects dependencies, tracks budget)│
+└─────────────┬──────────────────────────┘
+              │
+    ┌─────────┼─────────┬─────────┐
+    ↓         ↓         ↓         ↓
+Literature  Analysis  Modeling  Writeup
+ Review    Execution            Results
+    │         │         │         │
+    └─────────┴─────────┴─────────┘
+              ↓
+      Critical Review
+              ↓
+   Publication-Ready Outputs
 ```
 
-## Agent Team
+### 💰 Self-Aware Token Management
 
-All agents use Claude Sonnet 4 via the Anthropic API with structured role-specific prompting:
+- **Real-time tracking**: Per-agent, per-workflow, per-phase granularity
+- **Bayesian learning**: Historical usage improves future allocations
+- **Budget-aware loops**: Agents adapt iterations based on remaining tokens
+- **Transparent reporting**: Users see usage at every checkpoint
 
-| Agent | Guild | Role | Specialty |
-|-------|-------|------|-----------|
-| **Bohr** | Synthesis | Project Manager | Orchestration, user interaction, workflow selection |
-| **Gould** | Synthesis | Librarian Writer | Literature review, citations, scientific writing |
-| **Farber** | Synthesis | Clinician Critic | Critical review, clinical relevance, quality control |
-| **Feynman** | Theory | Curious Physicist | Creative problem-solving, analogies, naive questions |
-| **Shannon** | Theory | Information Theorist | Experimental design, methodology, analytical rigor |
-| **Greider** | Theory | Molecular Biologist | Biological mechanisms, pathway interpretation |
-| **Dayhoff** | Implementation | Bioinformatician | Workflow design, data pipelines, execution planning |
-| **Hinton** | Implementation | CS Engineer | Code development, debugging, script execution |
-| **Bayes** | Implementation | Statistician | Statistical validation, uncertainty quantification |
+### 🔒 Security & Reproducibility
+
+- **PathGuard**: Code-enforced file access control (not prompt-based)
+- **Session checkpointing**: Resume interrupted analyses without re-running work
+- **Complete audit trails**: JSONL events + human-readable transcripts
+- **Atomic operations**: Rollback on failure prevents partial state
+
+### 📝 VS Code-Style Tool Patterns
+
+MiniLab implements modern agent-tool interaction patterns:
+
+- **Two-phase execution**: `prepare()` → `invoke()` for validation before action
+- **Typed response streaming**: Structured progress reporting (not just strings)
+- **EditSession**: Atomic batched file edits with preview/commit/rollback
+- **Tool selection control**: Runtime per-agent tool enablement
+
+---
 
 ## Installation
 
 ### Prerequisites
 
-- macOS or Linux
-- Python 3.11 or higher
-- micromamba, conda, or mamba for environment management
-- Anthropic API key (required)
-- Tavily API key (optional, for web search)
+- Python 3.11+
+- [micromamba](https://mamba.readthedocs.io/en/latest/installation.html) or conda (recommended)
+- Anthropic API key (for Claude models)
 
 ### Setup
 
 ```bash
 # Clone repository
-git clone https://github.com/denniepatton/MiniLab.git
+git clone https://github.com/yourusername/MiniLab.git
 cd MiniLab
 
-# Create environment
-micromamba env create -f environment.yml
+# Create environment (recommended)
+micromamba create -f environment.yml
 micromamba activate minilab
 
-# Install in development mode
+# Or using pip
 pip install -e .
 
-# Configure environment variables
+# Configure API keys
 cp example.env .env
-# Edit .env with your API keys
+# Edit .env with your ANTHROPIC_API_KEY
+```
 
-# Verify installation
-python -c "from MiniLab import run_minilab; print('MiniLab ready')"
+### Verify Installation
+
+```bash
+python -c "from MiniLab import run_minilab; print('✓ MiniLab installed successfully')"
+```
+
+---
+
+## Quickstart
+
+### Basic Usage
+
+```bash
+# Start interactive session
+python scripts/minilab.py
+
+# With custom token budget
+python scripts/minilab.py --budget 500000
+```
+
+### Example Session
+
+```
+╭────────────────────────────────────────╮
+│            🔬 MiniLab                  │
+│    Autonomous Research Assistant       │
+╰────────────────────────────────────────╯
+
+What would you like to analyze?
+> Analyze the Pluvicto clinical trial data to identify genomic predictors of treatment response
+
+[Bohr] Understood. I'll coordinate a comprehensive analysis:
+  1. Literature review of Pluvicto response biomarkers
+  2. Exploratory data analysis of the genomic features
+  3. Statistical modeling for response prediction
+  4. Critical review and documentation
+
+Proceed with this plan? [y/n] > y
+
+[Gould] Starting literature review...
+...
+```
+
+### Programmatic API
+
+```python
+import asyncio
+from MiniLab import run_minilab
+
+async def main():
+    results = await run_minilab(
+        request="Analyze genomic predictors of treatment response",
+        project_name="pluvicto_analysis",
+        budget=500_000,
+    )
+    
+    print(f"Status: {results.status}")
+    print(f"Outputs: {results.artifacts}")
+
+asyncio.run(main())
+```
+
+---
+
+## Architecture
+
+### Directory Structure
+
+```
+MiniLab/
+├── MiniLab/                    # Core package
+│   ├── agents/                 # AI agent implementations
+│   │   ├── base.py            # Agent with ReAct loop
+│   │   ├── prompts.py         # Prompt construction
+│   │   └── registry.py        # Agent instantiation
+│   ├── config/                 # Configuration management
+│   │   ├── budget_manager.py  # Token budget tracking
+│   │   └── budget_history.py  # Bayesian usage learning
+│   ├── context/               # RAG and context management
+│   │   ├── context_manager.py # Document retrieval
+│   │   └── embeddings.py      # Sentence transformers
+│   ├── core/                  # Core infrastructure
+│   │   ├── token_account.py   # Real-time token tracking
+│   │   ├── task_graph.py      # DAG execution planning
+│   │   ├── project_ssot.py    # Single source of truth
+│   │   └── budget_isolation.py# Budget slices for agents
+│   ├── infrastructure/        # System-level utilities
+│   │   ├── features.py        # Feature registry
+│   │   └── errors.py          # Error categorization
+│   ├── llm_backends/          # LLM provider adapters
+│   │   ├── anthropic_backend.py
+│   │   └── openai_backend.py
+│   ├── orchestrator/          # Workflow coordination
+│   │   ├── orchestrator.py    # Main orchestrator
+│   │   └── dag_orchestrator.py# Pure DAG executor
+│   ├── security/              # Access control
+│   │   ├── path_guard.py      # File operation validation
+│   │   └── sandbox.py         # Execution isolation
+│   ├── storage/               # Persistence
+│   │   └── transcript.py      # Human-readable logs
+│   ├── tools/                 # Agent capabilities
+│   │   ├── base.py            # Tool ABC with prepare/invoke
+│   │   ├── code_editor.py     # Code manipulation
+│   │   ├── filesystem.py      # File operations
+│   │   ├── terminal.py        # Shell execution
+│   │   ├── arxiv.py           # ArXiv search
+│   │   ├── pubmed.py          # PubMed search
+│   │   ├── web_search.py      # Web search
+│   │   ├── edit_session.py    # Atomic file edits
+│   │   ├── response_stream.py # Typed progress
+│   │   └── tool_selector.py   # Tool enablement
+│   └── workflows/             # Analysis modules
+│       ├── consultation.py    # User intent → TaskGraph
+│       ├── literature_review.py
+│       ├── execute_analysis.py
+│       ├── writeup_results.py
+│       └── critical_review.py
+├── scripts/
+│   └── minilab.py             # CLI entry point
+├── Sandbox/                   # Project outputs (gitignored)
+├── ReadData/                  # Input datasets
+├── minilab_config.yaml        # System configuration
+├── ARCHITECTURE.md            # Detailed architecture docs
+└── environment.yml            # Conda environment spec
+```
+
+### Core Components
+
+#### TokenAccount
+Centralized, real-time token tracking with taxonomy-based attribution:
+- Per-agent, per-tool, per-operation granularity
+- Integrates with BudgetHistory for Bayesian learning
+- Provides usage summaries and cost estimates
+
+#### TaskGraph
+DAG-based execution planning:
+- Generated by Consultation workflow
+- Defines tasks, dependencies, and agent assignments
+- Orchestrator respects dependencies for execution order
+
+#### PathGuard
+Code-enforced security (not prompt-based):
+- Validates all file operations before execution
+- Agent-specific write permissions
+- Audit logging of all access attempts
+
+#### EditSession
+VS Code-style atomic file editing:
+- Stage multiple edits before committing
+- Preview changes with diffs
+- Rollback on failure
+
+---
+
+## Configuration
+
+MiniLab is configured via `minilab_config.yaml`:
+
+```yaml
+# Token budgets
+budget:
+  default_budget: 500000
+  phase_allocations:
+    discovery: 0.05
+    planning: 0.15
+    execution: 0.60
+    synthesis: 0.15
+    review: 0.05
+  learning: true  # Enable Bayesian adaptation
+
+# Feature requirements
+features:
+  pdf_generation:
+    required: true
+  prompt_caching:
+    required: true
+  rag_retrieval:
+    required: false
+
+# Error handling policies
+error_handling:
+  missing_required_feature: fatal
+  network_timeout: retry
+  optional_feature_missing: skip
 ```
 
 ### Environment Variables
@@ -167,183 +327,97 @@ python -c "from MiniLab import run_minilab; print('MiniLab ready')"
 # Required
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Optional - Web Search
-TAVILY_API_KEY=tvly-...
-
-# Optional - PubMed (higher rate limits)
-NCBI_EMAIL=your@email.com
-NCBI_API_KEY=...
-
-# Optional - Timing/Debug
-MINILAB_TIMING=1  # Enable timing reports
+# Optional
+MINILAB_SANDBOX=/path/to/sandbox  # Output directory
+MINILAB_BUDGET=500000             # Default token budget
+MINILAB_LOG_LEVEL=INFO            # Logging verbosity
 ```
 
-## Usage
+---
 
-### Command Line Interface
+## Agents
 
-```bash
-# Start a new analysis project
-python scripts/minilab.py "Analyze the Pluvicto genomic data for treatment response predictors"
+### Communication Patterns
 
-# Quick literature review
-python scripts/minilab.py "What is the state of the art in cfDNA methylation analysis?"
-
-# Resume an existing project
-python scripts/minilab.py --resume Sandbox/pluvicto_analysis
-
-# List existing projects
-python scripts/minilab.py --list-projects
-
-# Enable performance timing
-python scripts/minilab.py --timing
-```
-
-### Python API
+Agents communicate through structured consultations:
 
 ```python
-import asyncio
-from MiniLab import run_minilab
-
-async def main():
-    results = await run_minilab(
-        request="Analyze genomic features predictive of Pluvicto response",
-        project_name="pluvicto_analysis",
-    )
-    print(results["final_summary"])
-
-asyncio.run(main())
+# Agent consulting a colleague
+response = await self.consult_colleague(
+    colleague_id="hinton",
+    question="What ML approach would you recommend for this classification problem?",
+    mode="focused",  # quick, focused, or detailed
+)
 ```
 
-### Interactive Session
+### Tool Access
 
-During execution, you can interrupt with `Ctrl+C` to access options:
-1. **Provide guidance** - Give direction to the current workflow
-2. **Skip to next phase** - Move past the current workflow step
-3. **Save and exit** - Preserve progress for later resumption
-4. **Continue** - Cancel the interrupt and proceed
+Each agent has specific tool permissions enforced by PathGuard:
 
-## Budget Management System
+| Agent | File Write Access | Special Capabilities |
+|:------|:------------------|:---------------------|
+| Bohr | All (coordinator) | Project planning |
+| Gould | `.md`, `.txt`, `.bib` | Literature synthesis |
+| Hinton | `.py`, `.json` | ML modeling |
+| Dayhoff | `.py`, `.csv`, `.fasta` | Bioinformatics |
+| Bayes | `.py`, `.json` | Statistical analysis |
 
-MiniLab v0.4.0 introduces an intelligent budget management system that learns from historical usage:
+### Budget Isolation
 
-### Bayesian Budget Learning
-
-The system maintains a history of token usage across workflows and uses Bayesian estimation to improve future allocations:
+Colleague consultations receive isolated budget slices:
 
 ```python
-# Budget history tracks actual vs. allocated tokens per workflow
-# Over time, allocations converge to realistic requirements
+# Automatic budget isolation in consultations
+# Colleague gets proportional allocation, not shared pool
+await self.consult_colleague(
+    colleague_id="bayes",
+    question="Is this correlation statistically significant?",
+    budget_isolation=True,  # Default
+)
 ```
 
-### Continuous Complexity Estimation
-
-Instead of coarse "Quick/Thorough/Comprehensive" tiers, complexity is now estimated as a continuous value (0.0-1.0):
-
-| Complexity | Description | Typical Use Case |
-|------------|-------------|------------------|
-| 0.0-0.3 | Simple | Quick questions, brainstorming |
-| 0.3-0.6 | Moderate | Standard analyses, literature reviews |
-| 0.6-0.8 | Complex | Multi-modal data, extensive pipelines |
-| 0.8-1.0 | Very Complex | Deep research, comprehensive analyses |
-
-### Budget Safeguards
-
-- **5% graceful shutdown reserve**: Always retains budget for clean completion
-- **Budget-scaled iterations**: Agent loop limits adjust based on remaining budget
-- **Self-critique checkpoints**: Agents verify output quality before committing
-- **Hard enforcement**: `BudgetExceededError` prevents runaway token usage
-
-### LLM Response Caching
-
-SQLite-backed caching reduces redundant API calls:
-- 24-hour TTL for cached responses
-- Automatic cache invalidation
-- Transparent integration with LLM backends
+---
 
 ## Workflows
 
-### Major Workflows
+### Available Workflows
 
-| Workflow | Description | Complexity Guidance |
-|----------|-------------|---------------------|
-| `brainstorming` | Explore ideas and hypotheses | Low (0.2-0.4) |
-| `literature_review` | Background research and synthesis | Moderate (0.4-0.6) |
-| `start_project` | Full analysis pipeline | High (0.6-0.8) |
-| `explore_dataset` | Data characterization and EDA | Moderate (0.4-0.6) |
+| Workflow | Purpose | Key Outputs |
+|:---------|:--------|:------------|
+| **Consultation** | Understand user intent | TaskGraph |
+| **Literature Review** | Background research | Nature PDF, bibliography |
+| **Planning Committee** | Multi-agent deliberation | Detailed analysis plan |
+| **Execute Analysis** | Run analysis code | Results, figures |
+| **Writeup Results** | Documentation | Reports, summaries |
+| **Critical Review** | Quality assurance | Review comments |
 
-### Mini-Workflow Modules
+### Custom Workflows
 
-1. **Consultation** - User discussion, goal clarification, complexity estimation
-2. **Literature Review** - PubMed/arXiv search with critical assessment
-3. **Planning Committee** - Multi-agent deliberation on methodology
-4. **Execute Analysis** - Dayhoff→Hinton→Bayes implementation loop
-5. **Write-up Results** - Documentation and report generation
-6. **Critical Review** - Quality assessment and recommendations
+Extend `WorkflowModule` to create new workflows:
 
-## Configuration Files
+```python
+from MiniLab.workflows import WorkflowModule, WorkflowResult
 
-MiniLab uses three main configuration files, each with a distinct purpose:
-
-| File | Purpose | Loaded By |
-|------|---------|-----------|
-| `config/agents.yaml` | Agent personas, communication style, operating principles | `loader.py` |
-| `config/team.yaml` | Security: tools, write permissions, shell access | `team_loader.py` |
-| `config/budgets.yaml` | Token budgets per workflow type | `budget_manager.py` |
-
-This separation of concerns allows:
-- **Personas** to be tuned independently of security
-- **Security policies** to be enforced uniformly
-- **Budgets** to be adjusted without touching agent definitions
-
-## Security Model
-
-MiniLab enforces strict file access control via `PathGuard` and `team.yaml`:
-
-| Directory | Access | Purpose |
-|-----------|--------|---------|
-| `ReadData/` | Read-only | Protected input data |
-| `Sandbox/` | Read-write | Project outputs and intermediate files |
-| Other paths | Blocked | No access outside workspace |
-
-### Agent-Specific Permissions (from `team.yaml`)
-
-| Agent | Shell Access | Writable Extensions |
-|-------|--------------|---------------------|
-| Hinton | ✓ | All |
-| Bayes | ✓ | `.py`, `.r`, `.R`, `.md`, `.txt`, `.json`, `.csv` |
-| Gould | ✗ | `.md`, `.txt`, `.bib`, `.json`, `.yaml`, `.yml` |
-| Others | ✗ | `.md`, `.txt`, `.json` |
-
-Additional protections:
-- Path traversal attacks are blocked
-- Comprehensive audit logging
-
-## Project Output Structure
-
-All outputs are organized within `Sandbox/{project_name}/`:
-
+class MyWorkflow(WorkflowModule):
+    name = "my_workflow"
+    
+    async def execute(self, context: dict) -> WorkflowResult:
+        # Your workflow logic
+        return WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            summary="Workflow completed successfully",
+            artifacts=["output.md"],
+        )
 ```
-{project_name}/
-├── project_specification.md    # Goals and scope from consultation
-├── data_manifest.md           # Summary of input data
-├── session.json               # Session state for resumption
-├── literature/
-│   ├── references.md          # Bibliography
-│   └── literature_summary.md  # Narrative synthesis
-├── planning/
-│   ├── analysis_plan.md       # Detailed analysis plan
-│   └── decision_rationale.md  # Planning decisions
-├── analysis/
-│   ├── exploratory/          # EDA scripts and outputs
-│   └── modeling/             # Statistical models
-├── figures/                   # Generated visualizations
-├── outputs/
-│   ├── summary_report.md     # Final findings
-│   └── tables/               # Result tables
-├── checkpoints/              # Workflow state for resumption
-└── logs/                     # Execution logs
-```
+
+---
+
+## Documentation
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)**: Detailed system architecture and design decisions
+- **[Examples](examples/)**: Sample analysis scripts
+
+---
 
 ## Development
 
@@ -351,115 +425,60 @@ All outputs are organized within `Sandbox/{project_name}/`:
 
 ```bash
 # Run all tests
-python -m pytest tests/ -v
+pytest
 
-# Run with coverage
-python -m pytest tests/ --cov=MiniLab --cov-report=html
+# With coverage
+pytest --cov=MiniLab --cov-report=html
 ```
 
-### Import Verification
+### Code Quality
 
-```python
-from MiniLab import (
-    run_minilab,
-    BohrOrchestrator,
-    PathGuard,
-    Agent,
-    WorkflowModule,
-    console,
-)
-print("All imports successful")
+```bash
+# Format code
+ruff format MiniLab/
+
+# Lint
+ruff check MiniLab/
+
+# Type checking
+mypy MiniLab/
 ```
 
-## Best Practices
+---
 
-1. **Trust the agents** - Allow the ReAct loop to iterate; avoid micromanaging
-2. **Prepare your data** - Ensure data files exist in `ReadData/` before starting
-3. **Use descriptive project names** - Facilitates organization and resumption
-4. **Start with exploration** - Use `brainstorming` or `literature_review` to understand scope
-5. **Review transcripts** - Stored in `Transcripts/` for debugging and auditing
-6. **Let budgets adapt** - The Bayesian system improves with use; trust its estimates
+## Citation
 
-## Limitations
+If you use MiniLab in your research, please cite:
 
-- Agents may produce hallucinations if not properly grounded with tool use
-- Long-running computations may require timeout adjustments
-- API costs accumulate with complex, multi-phase analyses
-- Requires active API keys for full functionality
-- Currently optimized for biomedical and computational biology research
+```bibtex
+@software{minilab2026,
+  title={MiniLab: Autonomous Multi-Agent Scientific Research Platform},
+  author={Patton, Robert},
+  year={2026},
+  url={https://github.com/yourusername/MiniLab},
+  note={DAG-driven multi-agent system for scientific analysis}
+}
+```
 
-## Data Security Notice
-
-MiniLab sends data to external APIs (Anthropic, Tavily, NCBI). Users should not process protected health information (PHI) without:
-- Institutional Review Board (IRB) approval
-- Business Associate Agreement (BAA) with API providers
-- Appropriate de-identification procedures
+---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MiniLab is released under the MIT License. See [LICENSE](LICENSE) for details.
+
+---
 
 ## Acknowledgments
 
-MiniLab is inspired by and builds upon ideas from:
-- [CellVoyager](https://www.biorxiv.org/content/10.1101/2025.06.03.657517v1) - Autonomous biological data analysis
-- [VirtualLab](https://www.nature.com/articles/s41586-025-09442-9) - Multi-agent scientific collaboration
-- Modern agentic coding assistants and ReAct-style agent architectures
+MiniLab builds on ideas from:
 
-## Changelog
+- **CellVoyager** (Stanford Zhou Lab) - Autonomous biological analysis
+- **VirtualLab** (Stanford) - Multi-agent collaborative research
+- **VS Code Agent Infrastructure** - Tool patterns and guardrails
+- **Apache Airflow** - DAG-based orchestration patterns
 
-### Version 0.4.0 (December 2025)
-- **Bayesian Budget Learning**: Historical token usage now informs future allocations via `BudgetHistory`
-- **Continuous Complexity Estimation**: Replaced coarse Quick/Thorough/Comprehensive tiers with 0.0-1.0 scale
-- **LLM Response Caching**: SQLite-backed cache with 24h TTL reduces redundant API calls
-- **Session Orchestrator**: New `SessionOrchestrator` manages full session lifecycle
-- **Self-Critique Checkpoints**: Agents verify output quality before committing (CellVoyager pattern)
-- **Budget-Scaled Iterations**: Agent loop limits adapt based on remaining budget (VS Code pattern)
-- **5% Graceful Shutdown Reserve**: Ensures clean completion within budget
-- **Codebase Cleanup**: Removed unused `runtime/` and `evaluation/` modules
+---
 
-### Version 0.3.3 (December 2025)
-- Minor bug fixes and stability improvements
-
-### Version 0.3.2 (December 2025)
-- **Intelligent Budget Allocation**: Bohr reserves 10% buffer for graceful completion, never exceeds budget
-- **Contextual Autonomy**: Natural language user preferences flow through to agent tools (no hardcoded levels)
-- **Budget Typo Handling**: Fixes common typos like "200l" → "200k", warns on ambiguous input
-- **Hard Budget Enforcement**: `BudgetExceededError` exception and agent ReAct loop budget checks
-- **User Preference Propagation**: Consultation captures "best judgment"/"without consulting" preferences
-- **Auto-proceed in Autonomous Mode**: `user_input` tool respects user's autonomy preferences
-- **Graceful Completion**: Always finishes cleanly, skips to writeup when budget is low
-
-### Version 0.3.1 (December 2025)
-- **TokenAccount**: Real-time token budget tracking with warnings at 60/80/95% thresholds
-- **ProjectWriter**: Centralized output management preventing duplicate files
-- **Complete Transcript System**: Full lab notebook capturing all agent conversations, reasoning, and tool use
-- **Date Injection**: Current session date injected into all agent prompts (fixes date hallucination)
-- **Conditional data_manifest.md**: Only created when data files are present
-- **Single session_summary.md**: Prevented duplicate file creation by agents
-- **Output Guidelines**: Agents instructed not to create redundant files (executive_summary.md, etc.)
-- Budget warnings displayed to agents as they approach token limits
-
-### Version 0.3.0 (December 2025)
-- Redesigned token budget system with Quick/Thorough/Comprehensive tiers and custom input
-- Narrative-style orchestrator communication
-- Visible cross-agent consultations
-- Tiered literature review (Quick 3-step vs. Comprehensive 7-step)
-- Immediate graceful exit with agent interruption propagation
-- Consolidated output file structure (single living documents)
-- Enhanced transcript system as single source of truth
-- Agent signature guidelines ("MiniLab Agent [Name]")
-- Timestamp utilities to prevent date hallucination
-- Post-consultation summary showing confirmed scope and budget
-
-### Version 0.2.0 (December 2025)
-- Complete architecture refactor
-- PathGuard security system
-- Structured 5-part agent prompting
-- RAG context management with FAISS
-- Modular workflow system
-- Tavily web search integration
-- PubMed and arXiv literature tools
-- Bohr orchestrator for workflow coordination
-- Console utilities for styled output
-- Prompt caching for cost reduction
+<p align="center">
+  <strong>MiniLab</strong>: Professional scientific research through collaborative AI agents
+</p>

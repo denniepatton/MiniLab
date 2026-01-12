@@ -1,10 +1,14 @@
 """
 PathGuard: Unified security layer for all file system operations.
 
-This module enforces strict access control:
-- ReadData/: Read-only for all agents
-- Sandbox/: Read-write for all agents (with agent-specific write permissions)
-- All other paths: Denied
+This module enforces access control with two layers:
+1. Base layer: Structural rules (ReadData read-only, Sandbox read-write)
+2. Intent layer: Project-specific access derived from SSOT AccessPolicy
+
+Key change in v2: ReadData access is now INTENT-DERIVED.
+- If user requested data analysis → ReadData allowed
+- If user requested literature review → ReadData NOT allowed
+- This prevents agents from wandering into data when not relevant
 
 All tools (filesystem, terminal, code_editor) MUST call PathGuard before any I/O.
 """
@@ -17,7 +21,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..core.project_ssot import AccessPolicy
 
 
 class AccessLevel(Enum):
@@ -69,6 +76,15 @@ class PathGuard:
     Central authority for all path access in MiniLab.
     
     Singleton pattern ensures consistent enforcement across all tools.
+    
+    Access Control Layers:
+    1. Structural: Base rules for ReadData (read-only), Sandbox (read-write)
+    2. Intent: Project-specific access from SSOT AccessPolicy
+    
+    Intent-aware access (v2):
+    - ReadData access is disabled by default
+    - Only enabled if user request implies data analysis
+    - Prevents agents from exploring data when doing lit review
     """
     
     _instance: Optional[PathGuard] = None
@@ -76,6 +92,41 @@ class PathGuard:
     # Base directories (set relative to workspace root)
     READ_ONLY_DIRS = ["ReadData"]
     READ_WRITE_DIRS = ["Sandbox"]
+
+    # Files that should never be created as project outputs.
+    # (Keep in sync with ProjectWriter.FORBIDDEN_FILES when possible.)
+    FORBIDDEN_FILENAMES = {
+        "executive_summary.md",
+        "brief_bibliography.md",
+        "search_summary.md",
+        "literature_search_summary.md",
+        "session_summary.md",
+    }
+
+    # Windows/Office temp files and other junk we never want committed into a project.
+    FORBIDDEN_BASENAME_PATTERNS = [
+        r"^~\$",  # Office lock files
+        r"^\.DS_Store$",
+    ]
+
+    # Disallow throwaway scripts inside analysis/.
+    FORBIDDEN_ANALYSIS_PY_BASENAME_PATTERNS = [
+        r"^test_.*\.py$",
+        r"^.*_test\.py$",
+        r"^simple_test\.py$",
+        r"^scratch.*\.py$",
+        r"^tmp.*\.py$",
+        r"^debug.*\.py$",
+        r"^playground.*\.py$",
+    ]
+
+    # Allow only controlled names for analysis python scripts (keeps outputs tidy).
+    # Examples: 01_preprocess.py, 02_features.py, 03_model.py, run_analysis.py
+    ALLOWED_ANALYSIS_PY_BASENAME_PATTERNS = [
+        r"^run_analysis\.py$",
+        r"^\d{2}_[a-z0-9_]+\.py$",
+        r"^__init__\.py$",
+    ]
     
     # Default agent permissions by role
     DEFAULT_PERMISSIONS = {
@@ -153,12 +204,65 @@ class PathGuard:
     def __init__(self, workspace_root: Optional[Path] = None):
         if self._initialized and workspace_root is None:
             return
-        
-        self.workspace_root = workspace_root or Path.cwd()
+
+        self.workspace_root = (workspace_root or Path.cwd()).resolve()
         self.audit_log: list[AccessAttempt] = []
         self.logger = logging.getLogger("minilab.security")
         self._agent_permissions: dict[str, AgentPermissions] = dict(self.DEFAULT_PERMISSIONS)
+        
+        # Intent-aware access: project-specific policy from SSOT
+        self._access_policy: Optional["AccessPolicy"] = None
+        
         self._initialized = True
+    
+    def set_access_policy(self, policy: "AccessPolicy") -> None:
+        """
+        Set the project-specific access policy from SSOT.
+        
+        This enables intent-derived access control:
+        - If user requested data analysis → ReadData allowed
+        - If user requested lit review → ReadData NOT allowed
+        """
+        self._access_policy = policy
+        self.logger.info(f"Access policy set: ReadData allowed = {policy.readdata_allowed}")
+    
+    def clear_access_policy(self) -> None:
+        """Clear the access policy (revert to base rules only)."""
+        self._access_policy = None
+    
+    def _check_intent_access(self, rel_path: Path, operation: str) -> tuple[bool, str]:
+        """
+        Check intent-derived access from SSOT AccessPolicy.
+        
+        Returns (allowed, reason).
+        """
+        if self._access_policy is None:
+            # No policy set - allow base structural access
+            return True, "No policy restriction"
+        
+        path_str = str(rel_path)
+        
+        # Check ReadData access
+        if "ReadData" in path_str or (rel_path.parts and rel_path.parts[0] == "ReadData"):
+            if not self._access_policy.readdata_allowed:
+                return False, "ReadData access not in project scope (user request does not involve data analysis)"
+            
+            # Check if specific file is in scope
+            if self._access_policy.data_files_in_scope:
+                # If specific files listed, check against them
+                in_scope = any(
+                    f in path_str for f in self._access_policy.data_files_in_scope
+                )
+                if not in_scope:
+                    # Allow directory listing but warn
+                    return True, "ReadData allowed (general access)"
+        
+        # Check project path access
+        if self._access_policy.project_path:
+            if path_str.startswith(self._access_policy.project_path):
+                return True, "Project path access"
+        
+        return True, "Allowed by policy"
     
     @classmethod
     def reset(cls):
@@ -174,7 +278,7 @@ class PathGuard:
     
     def set_workspace_root(self, workspace_root: Path) -> None:
         """Update the workspace root."""
-        self.workspace_root = workspace_root
+        self.workspace_root = workspace_root.resolve()
     
     def set_agent_permissions(self, agent_id: str, permissions: AgentPermissions) -> None:
         """Override permissions for a specific agent."""
@@ -254,9 +358,9 @@ class PathGuard:
         """
         Check if an agent can read from a path.
         
-        Readable paths:
-        - ReadData/* (always)
-        - Sandbox/* (always)
+        Access layers:
+        1. Structural: Must be in ReadData/ or Sandbox/
+        2. Intent: ReadData only allowed if project scope includes data
         """
         abs_path = self._resolve_path(path)
         rel_path = self._get_relative_path(abs_path)
@@ -265,14 +369,20 @@ class PathGuard:
             self._log_access(agent_id, str(path), "read", False, "Outside workspace")
             return False
         
-        # Check if in readable directories
+        # Structural check: must be in allowed directories
         readable_dirs = self.READ_ONLY_DIRS + self.READ_WRITE_DIRS
-        if self._is_in_allowed_dir(rel_path, readable_dirs):
-            self._log_access(agent_id, str(path), "read", True, "Allowed directory")
-            return True
+        if not self._is_in_allowed_dir(rel_path, readable_dirs):
+            self._log_access(agent_id, str(path), "read", False, "Not in allowed directory")
+            return False
         
-        self._log_access(agent_id, str(path), "read", False, "Not in allowed directory")
-        return False
+        # Intent check: is ReadData access allowed for this project?
+        intent_ok, intent_reason = self._check_intent_access(rel_path, "read")
+        if not intent_ok:
+            self._log_access(agent_id, str(path), "read", False, intent_reason)
+            return False
+        
+        self._log_access(agent_id, str(path), "read", True, f"Allowed ({intent_reason})")
+        return True
     
     def can_write(self, path: str | Path, agent_id: str) -> bool:
         """
@@ -295,6 +405,12 @@ class PathGuard:
                 f"Not in writable directory (must be in {self.READ_WRITE_DIRS})"
             )
             return False
+
+        # Prevent accidental recursive Sandbox nesting (Sandbox/Sandbox/...).
+        # This is almost always an error stemming from combining cwd=Sandbox with paths prefixed by Sandbox/.
+        if len(rel_path.parts) >= 2 and rel_path.parts[0] == "Sandbox" and rel_path.parts[1] == "Sandbox":
+            self._log_access(agent_id, str(path), "write", False, "Refusing to write into Sandbox/Sandbox (recursive nesting)")
+            return False
         
         # Check agent-specific permissions
         permissions = self.get_agent_permissions(agent_id)
@@ -312,6 +428,42 @@ class PathGuard:
                 f"Agent cannot write files with extension {abs_path.suffix}"
             )
             return False
+
+        # Global filename hygiene.
+        basename = abs_path.name
+        for pat in self.FORBIDDEN_BASENAME_PATTERNS:
+            if re.search(pat, basename, re.IGNORECASE):
+                self._log_access(agent_id, str(path), "write", False, f"Forbidden filename pattern: {pat}")
+                return False
+
+        if basename in self.FORBIDDEN_FILENAMES:
+            self._log_access(agent_id, str(path), "write", False, f"Forbidden canonical duplicate: {basename}")
+            return False
+
+        # Enforce tidy analysis scripts: no throwaway scratch/test files.
+        # Only applies within Sandbox/<project>/analysis/.
+        try:
+            parts = list(rel_path.parts)
+            if len(parts) >= 3 and parts[0] == "Sandbox" and parts[2] == "analysis" and abs_path.suffix.lower() == ".py":
+                for pat in self.FORBIDDEN_ANALYSIS_PY_BASENAME_PATTERNS:
+                    if re.search(pat, basename, re.IGNORECASE):
+                        self._log_access(agent_id, str(path), "write", False, f"Forbidden analysis script name: {basename}")
+                        return False
+                # Only enforce naming convention for NEW file creation; allow edits to existing files.
+                if not abs_path.exists():
+                    allowed = any(re.search(pat, basename) for pat in self.ALLOWED_ANALYSIS_PY_BASENAME_PATTERNS)
+                    if not allowed:
+                        self._log_access(
+                            agent_id,
+                            str(path),
+                            "write",
+                            False,
+                            "New analysis scripts must be named like 01_step.py or run_analysis.py (no ad-hoc filenames)",
+                        )
+                        return False
+        except Exception:
+            # If path parsing fails for any reason, fall back to default allow/deny above.
+            pass
         
         self._log_access(agent_id, str(path), "write", True, "Allowed")
         return True

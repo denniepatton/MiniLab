@@ -1,0 +1,154 @@
+# MiniLab Configuration
+# Single source of truth for all MiniLab settings
+
+# Project structure and paths
+project_structure:
+  sandbox_root: "Sandbox"
+  project_template: "{sandbox}/{project_name}"
+  transcripts_dir: "Transcripts"
+  archive_dir: "Archive"
+
+# Agent team roster and specializations
+agents:
+  bohr:
+    role: "Project Manager"
+    description: "High-level scientific planning, user communication, synthesis"
+    specializations: [planning, synthesis, communication]
+    can_execute: true
+  
+  gould:
+    role: "Science Writer"
+    description: "Literature review, documentation, clear explanations"
+    specializations: [literature, writing, citations]
+    can_execute: true
+  
+  farber:
+    role: "Clinical Expert"
+    description: "Experimental design, medical interpretation, protocols"
+    specializations: [experimental_design, medical_interpretation]
+    can_execute: true
+  
+  feynman:
+    role: "Theoretician"
+    description: "Physics, mathematics, theoretical analysis, first principles"
+    specializations: [theory, mathematics, physics]
+    can_execute: true
+  
+  shannon:
+    role: "Information Theorist"
+    description: "Statistics, signal processing, information theory"
+    specializations: [statistics, signal_processing, feature_selection]
+    can_execute: true
+  
+  greider:
+    role: "Molecular Biologist"
+    description: "Genetics, cellular mechanisms, biological interpretation"
+    specializations: [biology, genetics, molecular_mechanisms]
+    can_execute: true
+  
+  dayhoff:
+    role: "Bioinformatician"
+    description: "Sequence analysis, databases, computational biology"
+    specializations: [bioinformatics, databases, sequence_analysis]
+    can_execute: true
+  
+  hinton:
+    role: "ML Expert"
+    description: "Machine learning, neural networks, data analysis, modeling"
+    specializations: [machine_learning, neural_networks, modeling]
+    can_execute: true
+  
+  bayes:
+    role: "Statistician"
+    description: "Bayesian inference, probability, uncertainty quantification"
+    specializations: [statistics, bayesian_analysis, probability]
+    can_execute: true
+
+# Budget allocation (learned from history if available)
+budget:
+  default_budget: 500000  # tokens
+  min_budget: 50000
+  max_budget: 2000000
+  
+  # Phase allocation percentages (learned from BudgetHistory)
+  phase_allocations:
+    discovery: 0.05
+    planning: 0.15
+    execution: 0.60
+    synthesis: 0.15
+    review: 0.05
+  
+  # Hard caps per phase (prevent early phases from consuming entire budget)
+  phase_caps: {}  # Leave empty to use percentage allocations
+
+# Workflow configurations
+workflows:
+  consultation:
+    description: "User intent clarification and scope definition"
+    enabled: true
+    max_iterations: 2
+    quality_threshold: 0.8
+  
+  literature_review:
+    description: "Background research and context gathering"
+    enabled: true
+    max_iterations: 1
+    quality_threshold: 0.8
+  
+  planning_committee:
+    description: "Multi-agent deliberation on analysis approach"
+    enabled: true
+    max_iterations: 15
+    quality_threshold: 0.8
+  
+  execute_analysis:
+    description: "Data analysis and modeling execution"
+    enabled: true
+    max_iterations: 3
+    quality_threshold: 0.8
+  
+  writeup_results:
+    description: "Documentation and reporting"
+    enabled: true
+    max_iterations: 2
+    quality_threshold: 0.8
+  
+  critical_review:
+    description: "Quality assessment and iteration"
+    enabled: true
+    max_iterations: 2
+    quality_threshold: 0.9
+
+# Feature availability and policies
+features:
+  pdf_generation:
+    required: true
+    enabled: true
+    fallback_available: false
+  
+  prompt_caching:
+    required: true
+    enabled: true
+    fallback_available: false
+  
+  image_conversion:
+    required: false
+    enabled: true
+    fallback_available: true
+  
+  task_graph_visualization:
+    required: false
+    enabled: true
+    fallback_available: true
+  
+  rag_retrieval:
+    required: false
+    enabled: true
+    fallback_available: false
+
+# Error handling policies
+error_handling:
+  bare_exceptions: "log_and_continue"  # log_and_continue, retry, fatal
+  import_failures: "fatal"  # fatal, warn_and_continue
+  network_errors: "retry"  # retry, degrade, fatal
+  budget_exhaustion: "interactive"  # stop, degrade, interactive

@@ -28,6 +28,39 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+def _ensure_minilab_environment() -> None:
+    """Hard-require execution from the 'minilab' environment.
+
+    MiniLab relies on the micromamba/conda env being consistent so tools like
+    Graphviz, scientific Python deps, and analysis libraries are always present.
+    """
+    env_name = (
+        os.getenv("MAMBA_DEFAULT_ENV")
+        or os.getenv("CONDA_DEFAULT_ENV")
+        or os.getenv("VIRTUAL_ENV")
+        or ""
+    )
+    exe = Path(sys.executable).as_posix()
+
+    # Common, reliable signals
+    env_name_ok = str(env_name).strip().lower() == "minilab"
+    exe_ok = ("/envs/minilab/" in exe) or exe.endswith("/minilab/bin/python")
+
+    if env_name_ok or exe_ok:
+        return
+
+    msg = (
+        "MiniLab must be run from the 'minilab' micromamba/conda environment.\n\n"
+        f"Detected python: {sys.executable}\n"
+        f"Detected env: {env_name or '(none)'}\n\n"
+        "Activate and retry:\n"
+        "  micromamba activate minilab\n"
+        "  python scripts/minilab.py\n"
+    )
+    print(msg, file=sys.stderr)
+    raise SystemExit(2)
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -121,8 +154,13 @@ def list_projects() -> None:
     print()
 
 
-def show_welcome() -> str:
-    """Display welcome message and prompt for input."""
+async def show_welcome() -> str:
+    """
+    Display welcome message and get user request.
+    
+    Returns:
+        User's request string (empty if cancelled)
+    """
     from MiniLab.utils import console
     
     console.header("MiniLab - Multi-Agent Scientific Lab Assistant")
@@ -153,7 +191,7 @@ def show_welcome() -> str:
 
         # IMPORTANT: Users often paste multi-line requests.
         # `input()` reads only the first line, leaving the rest buffered in stdin.
-        # That buffered text can get consumed by later prompts (e.g. project name confirmation)
+        # That buffered text can get consumed by later prompts
         # making it look like the CLI didn't wait for input.
         lines = [first_line.rstrip("\n")]
         try:
@@ -171,6 +209,7 @@ def show_welcome() -> str:
 
         user_input = "\n".join(lines).strip()
         return user_input
+        
     except (KeyboardInterrupt, EOFError):
         print("\n\n  Goodbye!")
         return ""
@@ -179,6 +218,9 @@ def show_welcome() -> str:
 async def main_async(args: argparse.Namespace) -> int:
     """Async main function."""
     from MiniLab.utils import console
+
+    # Hard requirement: always run under the micromamba/conda 'minilab' env.
+    _ensure_minilab_environment()
     
     # Enable timing if requested
     if args.timing:
@@ -191,8 +233,8 @@ async def main_async(args: argparse.Namespace) -> int:
         list_projects()
         return 0
     
-    from MiniLab.orchestrators import BohrOrchestrator
-    from MiniLab.orchestrators.bohr_orchestrator import run_minilab
+    from MiniLab.orchestrator import MiniLabOrchestrator
+    from MiniLab.orchestrator.orchestrator import run_minilab
     
     if args.resume:
         # Resume existing project
@@ -200,7 +242,7 @@ async def main_async(args: argparse.Namespace) -> int:
         if not project_path.is_absolute():
             project_path = Path(__file__).parent.parent / args.resume
         
-        orchestrator = BohrOrchestrator()
+        orchestrator = MiniLabOrchestrator()
         try:
             await orchestrator.resume_session(project_path)
             console.workflow_start("Resuming session")
@@ -211,8 +253,8 @@ async def main_async(args: argparse.Namespace) -> int:
             console.error(f"Error resuming session: {e}")
             return 1
     
-    # Show welcome and get user request
-    request = show_welcome()
+    # Show welcome and get user request (no project name yet - Bohr handles that)
+    request = await show_welcome()
     if not request:
         return 0  # User cancelled
     
@@ -221,14 +263,28 @@ async def main_async(args: argparse.Namespace) -> int:
         list_projects()
         return 0
     
-    # Run analysis - always through consultation
+    # Run analysis - Bohr will handle understanding, naming, planning, and approval
     try:
         print()  # Clean spacing before Bohr takes over
         
         results = await run_minilab(request=request)
         
+        # Check if session was cancelled or interrupted
+        status = results.get('status', 'unknown')
+        if status == 'cancelled':
+            console.info("Session cancelled.")
+            return 0
+        elif status == 'interrupted':
+            console.info(results.get('message', 'Session interrupted.'))
+            return 0
+        
+        # Only print completion for actual completed work
         print()
-        console.workflow_complete("Analysis", results.get('final_summary', 'Done'))
+        final_summary = results.get('final_summary', '')
+        if final_summary:
+            console.workflow_complete("Analysis", final_summary)
+        else:
+            console.info("Session ended.")
         
         return 0
         

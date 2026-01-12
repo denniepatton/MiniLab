@@ -2,13 +2,21 @@
 Base classes for the typed tool system.
 
 All tools inherit from Tool and use Pydantic models for input/output validation.
+
+Now includes VS Code-style two-phase execution:
+1. prepare() - Validate, estimate cost, request confirmation if needed
+2. execute() - Actually perform the operation
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar, TYPE_CHECKING
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from .prepared_invocation import PreparedInvocation
+    from .response_stream import ResponseStream
 
 
 class ToolInput(BaseModel):
@@ -23,6 +31,11 @@ class ToolOutput(BaseModel):
     success: bool = True
     error: Optional[str] = None
     data: Any = None
+    
+    # Added: metadata for tracking
+    estimated_tokens: int = 0
+    actual_tokens: int = 0
+    from_cache: bool = False
     
     class Config:
         extra = "allow"
@@ -48,6 +61,10 @@ class Tool(ABC):
     
     Tools are typed functions with explicit input/output schemas,
     integrated security via PathGuard, and agent-aware execution.
+    
+    Now supports VS Code-style two-phase execution:
+    1. prepare() - Pre-flight validation, cost estimation, confirmation
+    2. execute() - Actual execution
     """
     
     name: str
@@ -57,6 +74,7 @@ class Tool(ABC):
         self,
         agent_id: str,
         permission_callback: Optional[Callable[[str], bool]] = None,
+        response_stream: Optional[ResponseStream] = None,
         **_unused: Any,
     ):
         """
@@ -65,9 +83,15 @@ class Tool(ABC):
         Args:
             agent_id: The ID of the agent using this tool
             permission_callback: Optional callback for permission prompts
+            response_stream: Optional stream for progress reporting
         """
         self.agent_id = agent_id
         self.permission_callback = permission_callback
+        self.response_stream = response_stream
+    
+    def set_response_stream(self, stream: ResponseStream) -> None:
+        """Set the response stream for progress reporting."""
+        self.response_stream = stream
     
     @abstractmethod
     def get_actions(self) -> dict[str, str]:
@@ -92,6 +116,58 @@ class Tool(ABC):
         """
         pass
     
+    async def prepare(
+        self,
+        action: str,
+        params: dict[str, Any],
+    ) -> PreparedInvocation:
+        """
+        Prepare a tool invocation - VS Code style pre-flight check.
+        
+        Override this method to:
+        - Validate parameters beyond schema
+        - Estimate token/time cost
+        - Request user confirmation for destructive actions
+        - Check cache for existing results
+        - Preview what will happen
+        
+        The default implementation does basic validation and returns
+        a valid PreparedInvocation with no confirmation required.
+        
+        Args:
+            action: The action to prepare
+            params: Parameters dict
+            
+        Returns:
+            PreparedInvocation with validation results and confirmation requirements
+        """
+        from .prepared_invocation import (
+            PreparedInvocation,
+            ConfirmationLevel,
+            get_default_confirmation_level,
+        )
+        
+        # Validate input schema
+        try:
+            self.validate_input(action, params)
+        except ToolError as e:
+            return PreparedInvocation.invalid([str(e)])
+        
+        # Check if action requires confirmation
+        confirmation_level = get_default_confirmation_level(self.name, action)
+        
+        if confirmation_level == ConfirmationLevel.DESTRUCTIVE:
+            return PreparedInvocation.needs_confirmation(
+                title=f"Confirm {self.name}.{action}",
+                message=f"This action may have irreversible effects.",
+                level=confirmation_level,
+                details=f"Parameters: {params}",
+            )
+        
+        return PreparedInvocation.valid(
+            preview=f"{self.name}.{action} with {len(params)} parameters",
+        )
+    
     @abstractmethod
     async def execute(self, action: str, params: dict[str, Any]) -> ToolOutput:
         """
@@ -105,6 +181,60 @@ class Tool(ABC):
             ToolOutput with results
         """
         pass
+    
+    async def prepare_and_execute(
+        self,
+        action: str,
+        params: dict[str, Any],
+        skip_confirmation: bool = False,
+    ) -> tuple[PreparedInvocation, Optional[ToolOutput]]:
+        """
+        Two-phase execution: prepare then execute.
+        
+        Args:
+            action: The action to perform
+            params: Parameters dict
+            skip_confirmation: Skip confirmation even if required
+            
+        Returns:
+            Tuple of (PreparedInvocation, ToolOutput or None if not executed)
+        """
+        # Phase 1: Prepare
+        prepared = await self.prepare(action, params)
+        
+        # Check if preparation failed
+        if not prepared.is_valid:
+            return prepared, ToolOutput(
+                success=False,
+                error=f"Validation failed: {', '.join(prepared.validation_errors)}",
+            )
+        
+        # Check if we have a cached result
+        if prepared.has_result:
+            return prepared, prepared.cached_result
+        
+        # Check if confirmation is required
+        if prepared.requires_confirmation and not skip_confirmation:
+            if self.permission_callback:
+                message = prepared.confirmation.message if prepared.confirmation else "Confirm action?"
+                confirmed = self.permission_callback(message)
+                if not confirmed:
+                    return prepared, ToolOutput(
+                        success=False,
+                        error="User cancelled the operation",
+                    )
+            else:
+                # No callback, but confirmation required - default deny
+                return prepared, ToolOutput(
+                    success=False,
+                    error="Confirmation required but no callback available",
+                )
+        
+        # Phase 2: Execute
+        result = await self.execute(action, params)
+        result.estimated_tokens = prepared.estimated_input_tokens + prepared.estimated_output_tokens
+        
+        return prepared, result
     
     def validate_input(self, action: str, params: dict[str, Any]) -> ToolInput:
         """

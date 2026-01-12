@@ -216,15 +216,25 @@ class UserInputTool(Tool):
                 _resume_spinner()
     
     async def _confirm(self, params: ConfirmInput) -> UserInputOutput:
-        """Ask the user for confirmation."""
+        """Ask the user for confirmation with plain English prompts."""
+        # Check if user preferences indicate autonomous operation
+        if self._should_auto_proceed():
+            # Auto-confirm based on default
+            return UserInputOutput(
+                success=True,
+                confirmed=params.default,
+                response="yes" if params.default else "no",
+            )
+        
         if not self.input_callback:
             return UserInputOutput(
                 success=False,
                 error="No input callback configured - cannot interact with user"
             )
         
-        default_str = "Y/n" if params.default else "y/N"
-        prompt = f"{params.message} [{default_str}]"
+        # Build a clear, plain English prompt
+        default_hint = "yes" if params.default else "no"
+        prompt = f"{params.message}\n\nPlease respond with 'yes' or 'no' (default: {default_hint})"
         
         # Pause spinner for user input
         was_spinning = _pause_spinner()
@@ -235,7 +245,8 @@ class UserInputTool(Tool):
             if not response:
                 confirmed = params.default
             else:
-                confirmed = response.lower() in ("y", "yes", "true", "1")
+                response_lower = response.lower().strip()
+                confirmed = response_lower in ("y", "yes", "true", "1", "ok", "sure", "proceed", "continue", "approve")
             
             return UserInputOutput(success=True, confirmed=confirmed, response=response)
             

@@ -308,8 +308,15 @@ class Console:
     # === Progress ===
     
     @classmethod
-    def progress(cls, current: int, total: int, label: str = "") -> None:
-        """Show progress indicator."""
+    def progress(cls, message: str) -> None:
+        """Show a real-time progress/status update on a single line."""
+        # Clear line and show status
+        status = cls._style(f"  ↳ {message}", Style.DIM)
+        print(f"\r\033[K{status}", end="", flush=True)
+    
+    @classmethod
+    def progress_bar(cls, current: int, total: int, label: str = "") -> None:
+        """Show progress bar indicator."""
         pct = int((current / total) * 100) if total > 0 else 0
         bar_width = 30
         filled = int(bar_width * current / total) if total > 0 else 0
@@ -360,169 +367,131 @@ class Console:
         print(styled, end=" ")
 
 
-class Spinner:
+class ActivityLog:
     """
-    Animated spinner for showing activity.
+    Scrolling activity log for agent operations.
     
-    Usage:
-        with Spinner("Processing..."):
-            do_work()
-        
-        # Or manually:
-        spinner = Spinner("Working")
-        spinner.start()
-        do_work()
-        spinner.stop("Done!")
+    Replaces spinner-based display with a clean scrolling log that shows:
+    - Full agent activity descriptions (not truncated)
+    - Tool operations as they complete
+    - Progress through tasks
     
-    Activity Tracking:
-        spinner.set_activity("[BOHR] is consulting with [FEYNMAN]")
-        spinner.set_activity("[DAYHOFF] is exploring the dataset")
+    Design principles:
+    - Each activity gets its own line
+    - No truncation - full context is shown
+    - Maintains a "current phase" header that can be updated
+    - Tool results and activities scroll naturally
     """
     
-    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    _current_log: Optional["ActivityLog"] = None
+    _current_phase: str = ""
+    _current_agent: str = ""
+    _last_activity: str = ""
+    _running: bool = False
     
-    # Singleton for global access during workflows
-    _current_spinner = None
-    
-    def __init__(self, message: str = "Working", color: str = Style.CYAN):
-        self.message = message
-        self.color = color
-        self._running = False
+    def __init__(self, phase: str = "Working"):
+        self.phase = phase
         self._paused = False
-        self._thread = None
-        self._frame_idx = 0
-        self._lock = None
-        self._activity = ""  # Current detailed activity
-        self._last_output_line = ""
     
     @classmethod
-    def current(cls) -> Optional["Spinner"]:
-        """Get the currently active spinner, if any."""
-        return cls._current_spinner
+    def current(cls) -> Optional["ActivityLog"]:
+        """Get the currently active log, if any."""
+        return cls._current_log
     
     @classmethod
     def set_global_activity(cls, activity: str) -> None:
-        """Set activity on the current spinner (if active)."""
-        if cls._current_spinner and cls._current_spinner._running:
-            cls._current_spinner.set_activity(activity)
+        """
+        Log an activity. Activities that are different from the last are printed.
+        
+        This is the main method called by agents to report what they're doing.
+        Format: "[AGENT] is doing something specific..."
+        """
+        if not cls._running:
+            return
+        
+        # Skip duplicate consecutive activities
+        if activity == cls._last_activity:
+            return
+        cls._last_activity = activity
+        
+        # Parse agent name from activity if present (format: "[AGENT] activity")
+        agent = ""
+        msg = activity
+        if activity.startswith("[") and "]" in activity:
+            bracket_end = activity.index("]")
+            agent = activity[1:bracket_end]
+            msg = activity[bracket_end + 1:].strip()
+        
+        # Print the activity as a log line (with dim styling for context)
+        if agent:
+            agent_styled = f"{Style.CYAN}{Style.BOLD}{agent}{Style.RESET}"
+            print(f"  {Style.DIM}↳{Style.RESET} {agent_styled} {msg}")
+        else:
+            print(f"  {Style.DIM}↳ {activity}{Style.RESET}")
+    
+    @classmethod
+    def log_phase(cls, phase: str, agent: str = "") -> None:
+        """
+        Log a new phase/task. This is a more prominent header line.
+        """
+        cls._current_phase = phase
+        cls._current_agent = agent
+        
+        if agent:
+            agent_styled = f"{Style.MAGENTA}{Style.BOLD}{agent.upper()}{Style.RESET}"
+            print(f"\n  {StatusIcon.RUNNING} {phase} ({agent_styled})")
+        else:
+            print(f"\n  {StatusIcon.RUNNING} {phase}")
     
     @classmethod
     def pause_for_input(cls) -> bool:
-        """Pause the current spinner for user input. Returns True if was running."""
-        if cls._current_spinner and cls._current_spinner._running:
-            cls._current_spinner.pause()
+        """Pause logging for user input. Returns True if was running."""
+        if cls._running:
+            cls._current_log._paused = True if cls._current_log else False
             return True
         return False
     
     @classmethod
     def resume_after_input(cls) -> None:
-        """Resume the current spinner after user input."""
-        if cls._current_spinner and cls._current_spinner._paused:
-            cls._current_spinner.resume()
-    
-    def _animate(self):
-        """Animation loop running in background thread."""
-        import time
-        try:
-            while self._running:
-                if self._paused:
-                    time.sleep(0.1)
-                    continue
-                    
-                frame = self.FRAMES[self._frame_idx % len(self.FRAMES)]
-                styled_frame = f"{self.color}{frame}{Style.RESET}"
-                
-                # Build display: base message + activity
-                if self._activity:
-                    display = f"{self.message}: {self._activity}"
-                else:
-                    display = self.message
-                
-                # Truncate if too long
-                max_width = 70
-                if len(display) > max_width:
-                    display = display[:max_width-3] + "..."
-                
-                # Write spinner, message, then return cursor to start of line
-                with self._lock:
-                    output = f"\r  {styled_frame} {display}"
-                    sys.stdout.write(output.ljust(80))
-                    sys.stdout.flush()
-                    self._last_output_line = output
-                
-                self._frame_idx += 1
-                time.sleep(0.1)
-        except Exception:
-            pass  # Silently exit if stdout is closed
-    
-    def set_activity(self, activity: str) -> None:
-        """Update the detailed activity message."""
-        self._activity = activity
+        """Resume logging after user input."""
+        if cls._current_log:
+            cls._current_log._paused = False
     
     def start(self):
-        """Start the spinner."""
-        import threading
-        if self._running:
-            return
-        self._lock = threading.Lock()
-        self._running = True
+        """Start the activity log."""
         self._paused = False
-        self._thread = threading.Thread(target=self._animate, daemon=False)
-        self._thread.start()
-        Spinner._current_spinner = self
+        ActivityLog._running = True
+        ActivityLog._current_log = self
+        ActivityLog._current_phase = self.phase
+        ActivityLog._last_activity = ""
     
     def pause(self):
-        """Pause spinner animation (for user input)."""
+        """Pause logging (for user input)."""
         self._paused = True
-        # Clear the line
-        try:
-            with self._lock:
-                sys.stdout.write("\r" + " " * 80 + "\r")
-                sys.stdout.flush()
-        except Exception:
-            pass
     
     def resume(self):
-        """Resume spinner animation after pause."""
+        """Resume logging after pause."""
         self._paused = False
     
     def update(self, message: str):
-        """Update the spinner base message."""
-        self.message = message
-        self._activity = ""  # Clear activity on new phase
+        """Update the current phase."""
+        self.phase = message
+        ActivityLog._current_phase = message
     
     def stop(self, final_message: str = None):
-        """Stop the spinner with optional final message."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=0.3)
-            self._thread = None
-        # Clear the spinner line
-        try:
-            sys.stdout.write("\r" + " " * 80 + "\r")
-            sys.stdout.flush()
-            if final_message:
-                print(f"  {Style.GREEN}{StatusIcon.SUCCESS}{Style.RESET} {final_message}")
-        except Exception:
-            pass
-        if Spinner._current_spinner is self:
-            Spinner._current_spinner = None
+        """Stop the activity log with optional final message."""
+        ActivityLog._running = False
+        if final_message:
+            print(f"  {Style.GREEN}{StatusIcon.SUCCESS}{Style.RESET} {final_message}")
+        ActivityLog._current_log = None
+        ActivityLog._last_activity = ""
     
     def stop_error(self, error_message: str):
-        """Stop the spinner with an error message."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=0.3)
-            self._thread = None
-        # Clear the spinner line
-        try:
-            sys.stdout.write("\r" + " " * 80 + "\r")
-            sys.stdout.flush()
-            print(f"  {Style.RED}{StatusIcon.FAILURE}{Style.RESET} {error_message}")
-        except Exception:
-            pass
-        if Spinner._current_spinner is self:
-            Spinner._current_spinner = None
+        """Stop the activity log with an error message."""
+        ActivityLog._running = False
+        print(f"  {Style.RED}{StatusIcon.FAILURE}{Style.RESET} {error_message}")
+        ActivityLog._current_log = None
+        ActivityLog._last_activity = ""
     
     def __enter__(self):
         self.start()
@@ -534,6 +503,10 @@ class Spinner:
         else:
             self.stop()
         return False
+
+
+# Backwards compatibility alias
+Spinner = ActivityLog
 
 
 # Convenience singleton
@@ -574,6 +547,75 @@ from .timing import (
     print_timing_summary,
 )
 
+
+def extract_json_from_text(text: str, fallback: dict = None) -> dict:
+    """
+    Extract JSON object from text that may contain markdown code blocks or prose.
+    
+    This is a utility for parsing LLM responses that contain JSON.
+    It handles:
+    - ```json ... ``` code blocks
+    - Raw JSON objects
+    - JSON embedded in prose
+    
+    Args:
+        text: Text that may contain JSON
+        fallback: Default value if no valid JSON found
+        
+    Returns:
+        Parsed JSON dict, or fallback if parsing fails
+    """
+    import json
+    
+    if not text:
+        return fallback or {}
+    
+    # Try to find JSON in code block first
+    if "```json" in text:
+        start = text.find("```json") + 7
+        end = text.find("```", start)
+        if end > start:
+            json_str = text[start:end].strip()
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
+    
+    # Try generic code block
+    if "```" in text:
+        start = text.find("```") + 3
+        # Skip language identifier if present
+        newline = text.find("\n", start)
+        if newline > start:
+            start = newline + 1
+        end = text.find("```", start)
+        if end > start:
+            json_str = text[start:end].strip()
+            if json_str.startswith("{"):
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+    
+    # Try to find raw JSON object by matching braces
+    if "{" in text:
+        start = text.find("{")
+        depth = 0
+        for i, char in enumerate(text[start:], start):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    json_str = text[start:i+1]
+                    try:
+                        return json.loads(json_str)
+                    except json.JSONDecodeError:
+                        break
+    
+    return fallback or {}
+
+
 __all__ = [
     # Console
     "Style",
@@ -584,6 +626,7 @@ __all__ = [
     # Utilities
     "get_current_timestamp",
     "get_current_date",
+    "extract_json_from_text",
     # Timing
     "TimingCollector",
     "TimingContext",
