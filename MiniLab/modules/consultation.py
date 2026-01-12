@@ -1,5 +1,5 @@
 """
-CONSULTATION Workflow Module.
+CONSULTATION Module.
 
 Initial phase for understanding user goals and generating a TaskGraph.
 Bohr creates a DAG of tasks that defines the execution plan.
@@ -13,7 +13,7 @@ from pathlib import Path
 import csv
 import json
 
-from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
+from .base import Module, ModuleResult, ModuleCheckpoint, ModuleStatus
 from ..core.task_graph import TaskGraph
 from ..utils import console
 
@@ -27,12 +27,20 @@ class ConsultationOutput:
     complexity: float
 
 
-class ConsultationModule(WorkflowModule):
+class ConsultationModule(Module):
     """
     CONSULTATION: The entry point for MiniLab.
     
+    Goal: Converge quickly on project name, scope, outputs, acceptance 
+    criteria, and budget.
+    
     Produces a TaskGraph that defines the entire execution plan.
     Bohr analyzes the request and generates a DAG of tasks.
+    
+    Outputs:
+        - artifacts/plan.md: Project plan
+        - planning/task_dag.json: Task graph
+        - project_specification.md: Initial spec
     """
     
     name = "consultation"
@@ -48,10 +56,10 @@ class ConsultationModule(WorkflowModule):
     async def execute(
         self,
         inputs: dict[str, Any],
-        checkpoint: Optional[WorkflowCheckpoint] = None,
-    ) -> WorkflowResult:
+        checkpoint: Optional[ModuleCheckpoint] = None,
+    ) -> ModuleResult:
         """
-        Execute consultation workflow.
+        Execute consultation module.
         
         Steps:
         1. Quick direct data scan (NO agent loop)
@@ -61,8 +69,8 @@ class ConsultationModule(WorkflowModule):
         """
         valid, missing = self.validate_inputs(inputs)
         if not valid:
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
+            return ModuleResult(
+                status=ModuleStatus.FAILED,
                 error=f"Missing required inputs: {missing}",
             )
         
@@ -72,7 +80,7 @@ class ConsultationModule(WorkflowModule):
         if checkpoint:
             self.restore(checkpoint)
         else:
-            self._status = WorkflowStatus.IN_PROGRESS
+            self._status = ModuleStatus.IN_PROGRESS
             self._current_step = 0
             self._state = {
                 "user_request": user_request,
@@ -90,14 +98,13 @@ class ConsultationModule(WorkflowModule):
                 self.save_checkpoint()
 
             # Check if Phase 1 understanding already happened (scope_confirmation set)
-            # If so, we skip the REDUNDANT USER PROMPT (step 3) but still do all analysis
             scope_already_confirmed = inputs.get("scope_confirmation") is not None
             
             # Step 2: Bohr analyzes request and proposes plan
             if self._current_step <= 1:
                 bohr = self.agents.get("bohr")
                 if not bohr:
-                    return WorkflowResult(status=WorkflowStatus.FAILED, error="Bohr agent unavailable")
+                    return ModuleResult(status=ModuleStatus.FAILED, error="Bohr agent unavailable")
                 
                 manifest_text = self._format_manifest(self._state["data_manifest"])
                 
@@ -110,13 +117,10 @@ class ConsultationModule(WorkflowModule):
                 self._current_step = 2
                 self.save_checkpoint()
             
-            # Step 3: User interaction (SKIP ONLY THE PROMPT if already confirmed in understanding phase)
-            # This does NOT skip team consultation - that happens in planning_committee workflow
+            # Step 3: User interaction (SKIP ONLY THE PROMPT if already confirmed)
             if self._current_step <= 2:
                 if scope_already_confirmed:
-                    # User already confirmed in understanding phase - no need to ask again
                     self._state["user_response"] = inputs.get("scope_response", "User confirmed understanding")
-                    # No message here - the flow continues to planning_committee which is the REAL team consultation
                 else:
                     # Need user interaction
                     from ..utils import Spinner
@@ -138,11 +142,9 @@ class ConsultationModule(WorkflowModule):
                 self.save_checkpoint()
             
             # Step 4: Bohr interprets user response and generates structured plan
-            # This is where the LLM does ALL interpretation - no regex parsing
             if self._current_step <= 3:
                 bohr = self.agents.get("bohr")
                 
-                # Single LLM call to interpret user response AND generate task graph
                 structured_plan = await bohr.simple_query(
                     query=self._build_interpretation_prompt(
                         user_request=self._state["user_request"],
@@ -153,19 +155,16 @@ class ConsultationModule(WorkflowModule):
                     context="Interpret user response and generate execution plan"
                 )
                 
-                # Extract structured data from Bohr's response
                 plan_data = self._extract_json_from_response(structured_plan)
                 
-                # CRITICAL VALIDATION: Project name must match session project
-                # This prevents consultation from proposing a different project
+                # Validate project name matches session
                 proposed_project = plan_data.get("project_name", "").strip()
                 actual_project = self.project_path.name
                 
                 if proposed_project and proposed_project != actual_project:
                     raise ValueError(
                         f"Consultation proposed different project name '{proposed_project}' "
-                        f"but approved project is '{actual_project}'. "
-                        f"This indicates a critical logic error. Aborting to prevent fragmentation."
+                        f"but approved project is '{actual_project}'."
                     )
                 
                 # Create TaskGraph from Bohr's interpretation
@@ -173,21 +172,23 @@ class ConsultationModule(WorkflowModule):
                 self._state["task_graph"] = task_graph.to_dict()
                 self._state["token_budget"] = plan_data.get("token_budget", 300_000)
                 
-                # Save TaskGraph to project
-                task_graph.save(self.project_path / "task_graph.json")
+                # Save TaskGraph to planning directory
+                planning_dir = self.project_path / "planning"
+                planning_dir.mkdir(parents=True, exist_ok=True)
+                task_graph.save(planning_dir / "task_dag.json")
                 
                 self._current_step = 4
             
             # Write outputs
             self._write_outputs()
             
-            self._status = WorkflowStatus.COMPLETED
+            self._status = ModuleStatus.COMPLETED
             
             # Reconstruct TaskGraph from state
             task_graph = TaskGraph.from_dict(self._state["task_graph"])
             
-            return WorkflowResult(
-                status=WorkflowStatus.COMPLETED,
+            return ModuleResult(
+                status=ModuleStatus.COMPLETED,
                 outputs={
                     "task_graph": task_graph,
                     "project_spec": self._state.get("analysis", ""),
@@ -197,16 +198,16 @@ class ConsultationModule(WorkflowModule):
                     "complexity": self._estimate_complexity(user_request),
                 },
                 artifacts=[
-                    str(self.project_path / "project_specification.md"),
-                    str(self.project_path / "task_graph.json"),
+                    str(self.project_path / "artifacts" / "plan.md"),
+                    str(self.project_path / "planning" / "task_dag.json"),
                 ],
                 summary=f"Consultation complete. Created task graph with {task_graph.get_progress()['total_tasks']} tasks.",
             )
             
         except Exception as e:
-            self._status = WorkflowStatus.FAILED
+            self._status = ModuleStatus.FAILED
             self._log_step(f"Error: {e}")
-            return WorkflowResult(status=WorkflowStatus.FAILED, error=str(e))
+            return ModuleResult(status=ModuleStatus.FAILED, error=str(e))
     
     def _build_consultation_prompt(self, user_request: str, manifest_text: str) -> str:
         """Build the consultation prompt for Bohr."""
@@ -246,12 +247,7 @@ Ask only if there's genuine ambiguity you cannot resolve yourself. If the user s
         user_response: str,
         data_manifest: dict[str, Any],
     ) -> str:
-        """
-        Build prompt for Bohr to interpret user response and generate structured plan.
-        
-        This is the key method - Bohr interprets ALL user input (budget, preferences, etc.)
-        and returns a structured JSON plan. No regex parsing of user input.
-        """
+        """Build prompt for Bohr to interpret user response and generate structured plan."""
         manifest_summary = self._format_manifest(data_manifest) if data_manifest else "No data files"
         
         return f"""You previously proposed an analysis plan and the user has responded. 
@@ -281,7 +277,7 @@ Then create a complete task execution plan.
 
 ```json
 {{
-  "token_budget": <integer - the token budget as a plain number, e.g. 1000000 for "1 million">,
+  "token_budget": <integer - the token budget as a plain number>,
   "user_preferences": "<string summarizing what the user wants>",
   "tasks": [
     {{
@@ -308,23 +304,16 @@ Then create a complete task execution plan.
 - bayes: Statistical analysis, Bayesian methods
 
 ## Guidelines
-- Token budget should be the integer the user specified (interpret their natural language)
-- If user didn't specify budget, use your recommended budget from the analysis
+- Token budget should be the integer the user specified
+- If user didn't specify budget, use your recommended budget
 - Task estimated_tokens should sum to approximately the total budget
 - Start with tasks that have no dependencies
-- Include a final documentation/writeup task
-- Be generous with token estimates - it's better to have budget left over than run out"""
+- Include a final documentation/writeup task"""
 
     def _extract_json_from_response(self, response: str) -> dict[str, Any]:
-        """
-        Extract JSON from Bohr's response using shared utility.
-        
-        All interpretation of user intent has already been done by Bohr.
-        This just extracts the structured JSON from the response.
-        """
+        """Extract JSON from Bohr's response."""
         from ..utils import extract_json_from_text
         
-        # Default fallback structure
         default = {
             "token_budget": 300_000,
             "user_preferences": "",
@@ -338,8 +327,7 @@ Then create a complete task execution plan.
         return extract_json_from_text(response, fallback=default)
 
     def _estimate_complexity(self, user_request: str) -> float:
-        """Simple complexity estimate - this could also be done by LLM if needed."""
-        # This is acceptable as simple heuristic, not parsing user intent
+        """Simple complexity estimate."""
         length = len(user_request)
         if length < 100:
             return 0.3
@@ -355,17 +343,13 @@ Then create a complete task execution plan.
         paths: list[Path] = []
         workspace_root = self.project_path.parent.parent
         
-        # Check common data directories
         for data_dir in ["ReadData", "Data", "data"]:
             data_path = workspace_root / data_dir
             if data_path.exists():
-                # If directory is mentioned or no specific path given, include it
                 if data_dir.lower() in request.lower() or "data" in request.lower():
                     paths.append(data_path)
         
-        # Also check for specific subdirectories mentioned
         for part in request.split():
-            # Clean up the part
             clean_part = part.strip(".,;:'\"()")
             if "/" in clean_part:
                 potential_path = workspace_root / clean_part
@@ -420,10 +404,19 @@ Then create a complete task execution plan.
         return "\n".join(lines)
     
     def _write_outputs(self) -> None:
-        """Write consultation outputs."""
-        self.project_path.mkdir(parents=True, exist_ok=True)
+        """Write consultation outputs to artifacts directory."""
+        # Create artifacts directory structure
+        artifacts_dir = self.project_path / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
         
-        # Write project specification
+        # Write plan.md
+        with open(artifacts_dir / "plan.md", "w") as f:
+            f.write("# Project Plan\n\n")
+            f.write(f"## Overview\n\n{self._state.get('analysis', '')}\n\n")
+            f.write(f"## User Preferences\n\n{self._state.get('user_response', 'None specified')}\n\n")
+            f.write(f"## Token Budget\n\n{self._state.get('token_budget', 300000):,} tokens\n")
+        
+        # Write project_specification.md for backward compatibility
         with open(self.project_path / "project_specification.md", "w") as f:
             f.write("# Project Specification\n\n")
             f.write(self._state.get("analysis", ""))
@@ -431,6 +424,6 @@ Then create a complete task execution plan.
         # Write data manifest if there are data files
         data_manifest = self._state.get("data_manifest", {})
         if data_manifest.get("files"):
-            with open(self.project_path / "data_manifest.md", "w") as f:
+            with open(artifacts_dir / "data_manifest.md", "w") as f:
                 f.write("# Data Manifest\n\n")
                 f.write(self._format_manifest(data_manifest))

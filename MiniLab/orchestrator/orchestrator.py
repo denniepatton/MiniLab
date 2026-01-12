@@ -3,7 +3,7 @@ MiniLab Session Orchestrator.
 
 IMPORTANT DISTINCTION:
 - MiniLabOrchestrator: Infrastructure class (Python code) that manages sessions,
-  executes workflows, tracks budgets, and coordinates the agent team.
+  executes modules, tracks budgets, and coordinates the agent team.
   This is NOT an AI agent - it's the mechanical backbone.
   
 - Bohr (agent): The AI "project manager" persona in agents.yaml who makes
@@ -19,7 +19,12 @@ Key Responsibilities:
 - Budget tracking and enforcement
 - Project state persistence
 - User interaction for confirmations
-- Workflow module coordination
+- Module coordination (Task → Module → Tool hierarchy)
+
+Terminology (aligned with minilab_outline.md):
+- Task: A project-DAG node representing a user-meaningful milestone
+- Module: A reusable procedure that composes tools and possibly agents
+- Tool: An atomic, side-effectful capability with typed I/O
 """
 
 from dataclasses import dataclass, field
@@ -38,17 +43,40 @@ from ..agents.prompts import PromptBuilder
 from ..storage import TranscriptLogger
 from ..core import TokenAccount, get_token_account, ProjectWriter
 from ..config.budget_history import get_budget_history
-from ..workflows import (
+
+# Import from new modules package (with backward compat aliases)
+from ..modules import (
+    Module,
+    ModuleResult,
+    ModuleStatus,
+    ConsultationModule,
+    LiteratureReviewModule,
+    TeamDiscussionModule,  # Was PlanningCommitteeModule
+    AnalysisExecutionModule,  # Was ExecuteAnalysisModule
+    BuildReportModule,  # Was WriteupResultsModule
+    CriticalReviewModule,
+    # New modules
+    PlanningModule,
+    OneOnOneModule,
+    CoreInputModule,
+    EvidenceGatheringModule,
+    WriteArtifactModule,
+    GenerateCodeModule,
+    RunChecksModule,
+    SanityCheckDataModule,
+    InterpretStatsModule,
+    InterpretPlotModule,
+    CitationCheckModule,
+    FormattingCheckModule,
+    ConsultExternalExpertModule,
+)
+# Keep backward compat imports
+from ..modules import (
     WorkflowModule,
     WorkflowResult,
     WorkflowStatus,
-    ConsultationModule,
-    LiteratureReviewModule,
-    PlanningCommitteeModule,
-    ExecuteAnalysisModule,
-    WriteupResultsModule,
-    CriticalReviewModule,
 )
+
 from ..core.task_graph import TaskGraph, TaskStatus as GraphTaskStatus, TaskNode
 from ..llm_backends import AnthropicBackend
 from ..utils import Style, console  # For continuation prompt styling + user-facing output
@@ -74,16 +102,34 @@ class MiniLabSession:
     """
     State container for a MiniLab session.
     
-    Tracks the current project, completed workflows, and artifacts.
+    Tracks the current project, completed modules, and artifacts.
+    (Updated terminology: workflows → modules)
     """
     session_id: str
     project_name: str
     project_path: Path
     started_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    current_workflow: Optional[str] = None
-    completed_workflows: list[str] = field(default_factory=list)
-    workflow_results: dict[str, WorkflowResult] = field(default_factory=dict)
+    current_module: Optional[str] = None
+    completed_modules: list[str] = field(default_factory=list)
+    module_results: dict[str, ModuleResult] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
+    
+    # Backward compat aliases (property-based)
+    @property
+    def current_workflow(self) -> Optional[str]:
+        return self.current_module
+    
+    @current_workflow.setter
+    def current_workflow(self, val: Optional[str]) -> None:
+        self.current_module = val
+    
+    @property
+    def completed_workflows(self) -> list[str]:
+        return self.completed_modules
+    
+    @property
+    def workflow_results(self) -> dict[str, ModuleResult]:
+        return self.module_results
     
     def to_dict(self) -> dict:
         return {
@@ -91,16 +137,19 @@ class MiniLabSession:
             "project_name": self.project_name,
             "project_path": str(self.project_path),
             "started_at": self.started_at,
-            "current_workflow": self.current_workflow,
-            "completed_workflows": self.completed_workflows,
-            "workflow_results": {
+            "current_module": self.current_module,
+            "completed_modules": self.completed_modules,
+            "module_results": {
                 k: {
                     "status": v.status.value,
                     "summary": v.summary,
                     "artifacts": v.artifacts,
                 }
-                for k, v in self.workflow_results.items()
+                for k, v in self.module_results.items()
             },
+            # Backward compat aliases in serialized form
+            "current_workflow": self.current_module,
+            "completed_workflows": self.completed_modules,
         }
     
     def save(self) -> Path:
@@ -112,7 +161,7 @@ class MiniLabSession:
     
     @classmethod
     def load(cls, session_path: Path) -> "MiniLabSession":
-        """Load session from disk."""
+        """Load session from disk (supports old and new terminology)."""
         with open(session_path) as f:
             data = json.load(f)
         return cls(
@@ -120,8 +169,9 @@ class MiniLabSession:
             project_name=data["project_name"],
             project_path=Path(data["project_path"]),
             started_at=data.get("started_at", ""),
-            current_workflow=data.get("current_workflow"),
-            completed_workflows=data.get("completed_workflows", []),
+            # Support both old and new keys
+            current_module=data.get("current_module") or data.get("current_workflow"),
+            completed_modules=data.get("completed_modules") or data.get("completed_workflows", []),
         )
 
 
@@ -152,37 +202,74 @@ class MiniLabOrchestrator:
         str(Path(__file__).parent.parent.parent / "Sandbox")
     ))
     
-    # Workflow class mapping - maps task types to workflow executors
-    WORKFLOW_MODULES = {
+    # Module class mapping - maps task types to module executors
+    # (Updated terminology: workflows → modules)
+    MODULE_CLASSES = {
         "consultation": ConsultationModule,
         "literature_review": LiteratureReviewModule,
-        "planning_committee": PlanningCommitteeModule,
-        "execute_analysis": ExecuteAnalysisModule,
-        "writeup_results": WriteupResultsModule,
+        "team_discussion": TeamDiscussionModule,
+        "planning_committee": TeamDiscussionModule,  # Alias for backward compat
+        "planning": PlanningModule,
+        "analysis_execution": AnalysisExecutionModule,
+        "execute_analysis": AnalysisExecutionModule,  # Alias for backward compat
+        "build_report": BuildReportModule,
+        "writeup_results": BuildReportModule,  # Alias for backward compat
         "critical_review": CriticalReviewModule,
+        # New modules
+        "one_on_one": OneOnOneModule,
+        "core_input": CoreInputModule,
+        "evidence_gathering": EvidenceGatheringModule,
+        "write_artifact": WriteArtifactModule,
+        "generate_code": GenerateCodeModule,
+        "run_checks": RunChecksModule,
+        "sanity_check_data": SanityCheckDataModule,
+        "interpret_stats": InterpretStatsModule,
+        "interpret_plot": InterpretPlotModule,
+        "citation_check": CitationCheckModule,
+        "formatting_check": FormattingCheckModule,
+        "consult_external_expert": ConsultExternalExpertModule,
     }
     
-    # Task-to-workflow mapping (tasks can use different workflows)
-    TASK_WORKFLOW_MAP = {
+    # Backward compat alias
+    WORKFLOW_MODULES = MODULE_CLASSES
+    
+    # Task-to-module mapping (tasks can use different modules)
+    TASK_MODULE_MAP = {
         "literature_review": "literature_review",
         "lit_review": "literature_review",
         "background": "literature_review",
-        "planning": "planning_committee",
-        "analysis_plan": "planning_committee",
-        "deliberation": "planning_committee",
-        "analysis": "execute_analysis",
-        "execute": "execute_analysis",
-        "data_exploration": "execute_analysis",
-        "modeling": "execute_analysis",
-        "statistical_analysis": "execute_analysis",
-        "writeup": "writeup_results",
-        "documentation": "writeup_results",
-        "report": "writeup_results",
-        "figures": "writeup_results",
+        "planning": "planning",
+        "analysis_plan": "team_discussion",
+        "deliberation": "team_discussion",
+        "analysis": "analysis_execution",
+        "execute": "analysis_execution",
+        "data_exploration": "analysis_execution",
+        "modeling": "analysis_execution",
+        "statistical_analysis": "analysis_execution",
+        "writeup": "build_report",
+        "documentation": "build_report",
+        "report": "build_report",
+        "figures": "build_report",
         "review": "critical_review",
         "validation": "critical_review",
         "quality_check": "critical_review",
+        # New task types
+        "expert_consultation": "one_on_one",
+        "core_discussion": "core_input",
+        "evidence": "evidence_gathering",
+        "artifact": "write_artifact",
+        "code": "generate_code",
+        "test": "run_checks",
+        "data_check": "sanity_check_data",
+        "stats_interpretation": "interpret_stats",
+        "plot_interpretation": "interpret_plot",
+        "citation_audit": "citation_check",
+        "format_check": "formatting_check",
+        "external_expert": "consult_external_expert",
     }
+    
+    # Backward compat alias
+    TASK_WORKFLOW_MAP = TASK_MODULE_MAP
     
     def __init__(
         self,
@@ -1321,8 +1408,8 @@ Respond with ONLY a JSON object:
                 # Mark task as in progress
                 next_task.mark_in_progress()
                 
-                # Map task to workflow module
-                workflow_name = self._task_to_workflow(task_id)
+                # Map task to module
+                module_name = self._task_to_module(task_id)
                 
                 console.info(f"Task {task_num}: {task_name} ({task_owner})")
                 console.info(f"Task objective: {next_task.description}")
@@ -1330,7 +1417,7 @@ Respond with ONLY a JSON object:
                 spinner = Spinner(f"Running {task_name}")
                 spinner.start()
                 self.transcript.log_stage_transition(task_id, f"Starting task: {task_name}")
-                self.session.current_workflow = task_id
+                self.session.current_module = task_id
                 self.session.save()
                 
                 # Execute the task
@@ -1342,11 +1429,11 @@ Respond with ONLY a JSON object:
                 except Exception:
                     start_txn_idx = 0
                 
-                task_workflow_key = f"phase4.task.{task_id}.{workflow_name}"
-                with token_context(workflow=task_workflow_key, trigger=f"task:{task_id}"):
+                task_module_key = f"phase4.task.{task_id}.{module_name}"
+                with token_context(workflow=task_module_key, trigger=f"task:{task_id}"):
                     result = await self._execute_task(
                         task=next_task,
-                        workflow_name=workflow_name,
+                        module_name=module_name,
                     )
                 
                 used_tokens = self.token_account.total_used - start_tokens
@@ -1409,7 +1496,7 @@ Respond with ONLY a JSON object:
                         self.session.context.update(result.outputs)
 
                         # Canonical persistence for write-up outputs
-                        if workflow_name == "writeup_results" and result.outputs.get("final_report"):
+                        if module_name in ("writeup_results", "build_report") and result.outputs.get("final_report"):
                             try:
                                 from ..core import ProjectWriter
                                 writer = ProjectWriter(
@@ -1422,9 +1509,9 @@ Respond with ONLY a JSON object:
                             except Exception:
                                 pass
                     
-                    self.session.completed_workflows.append(task_id)
+                    self.session.completed_modules.append(task_id)
                 
-                elif result.status == WorkflowStatus.PAUSED:
+                elif result.status == ModuleStatus.PAUSED:
                     # Controlled stop (budget exhausted or user stop). Do NOT mark task completed.
                     try:
                         # Preserve any partial outputs for later resume/debug.
@@ -1526,17 +1613,20 @@ Respond with ONLY a JSON object:
                 pass
             raise
     
-    def _task_to_workflow(self, task_id: str) -> str:
-        """Map a task ID to a workflow module name."""
+    def _task_to_module(self, task_id: str) -> str:
+        """Map a task ID to a module name."""
         task_lower = task_id.lower()
         
         # Check explicit mapping first
-        for key, workflow in self.TASK_WORKFLOW_MAP.items():
+        for key, module in self.TASK_MODULE_MAP.items():
             if key in task_lower:
-                return workflow
+                return module
         
-        # Default to execute_analysis for most tasks
-        return "execute_analysis"
+        # Default to analysis_execution for most tasks
+        return "analysis_execution"
+    
+    # Backward compat alias
+    _task_to_workflow = _task_to_module
     
     def _create_fallback_task_graph(self) -> TaskGraph:
         """Create a minimal fallback TaskGraph if consultation didn't produce one."""
@@ -1565,29 +1655,29 @@ Respond with ONLY a JSON object:
     async def _execute_task(
         self,
         task: TaskNode,
-        workflow_name: str,
-    ) -> WorkflowResult:
+        module_name: str,
+    ) -> ModuleResult:
         """
         Execute a single task from the TaskGraph.
         
-        Routes to the appropriate workflow module based on the task type.
+        Routes to the appropriate module based on the task type.
         """
-        if workflow_name not in self.WORKFLOW_MODULES:
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
-                error=f"Unknown workflow for task: {workflow_name}",
+        if module_name not in self.MODULE_CLASSES:
+            return ModuleResult(
+                status=ModuleStatus.FAILED,
+                error=f"Unknown module for task: {module_name}",
             )
         
-        # Instantiate workflow module
-        workflow_class = self.WORKFLOW_MODULES[workflow_name]
-        workflow = workflow_class(
+        # Instantiate module
+        module_class = self.MODULE_CLASSES[module_name]
+        module = module_class(
             agents=self.agents,
             context_manager=self.context_manager,
             project_path=self.session.project_path,
         )
         
         # Prepare inputs
-        inputs = self._prepare_workflow_inputs(workflow)
+        inputs = self._prepare_module_inputs(module)
         inputs["task_description"] = task.description
         inputs["task_owner"] = task.owner
         inputs["estimated_tokens"] = task.estimated_tokens
@@ -1596,7 +1686,7 @@ Respond with ONLY a JSON object:
         supporting_context = self._build_supporting_context()
         
         # Execute with autonomous mode
-        result = await workflow.execute_autonomous(
+        result = await module.execute_autonomous(
             inputs=inputs,
             lead_agent=task.owner,
             objective=task.description,
@@ -1608,7 +1698,7 @@ Respond with ONLY a JSON object:
     async def _handle_task_failure(
         self,
         task: TaskNode,
-        result: WorkflowResult,
+        result: ModuleResult,
     ) -> bool:
         """
         Handle a task failure with user-friendly prompts.
@@ -1898,51 +1988,51 @@ Return ONLY valid JSON."""
             console.info(f"Unrecognized input '{response}'. Saving progress for later...")
             return None
     
-    async def _execute_workflow(
+    async def _execute_module(
         self,
-        workflow_name: str,
+        module_name: str,
         autonomous: bool = False,
         objective: Optional[str] = None,
-    ) -> WorkflowResult:
+    ) -> ModuleResult:
         """
-        Execute a specific workflow module.
+        Execute a specific module.
         
         Args:
-            workflow_name: Name of workflow to execute
+            module_name: Name of module to execute
             autonomous: If True, use autonomous execution mode (agent-driven)
             objective: High-level objective for autonomous mode
             
         Returns:
-            WorkflowResult from execution
+            ModuleResult from execution
         """
-        if workflow_name not in self.WORKFLOW_MODULES:
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
-                error=f"Unknown workflow: {workflow_name}",
+        if module_name not in self.MODULE_CLASSES:
+            return ModuleResult(
+                status=ModuleStatus.FAILED,
+                error=f"Unknown module: {module_name}",
             )
         
-        # Instantiate workflow module
-        workflow_class = self.WORKFLOW_MODULES[workflow_name]
-        workflow = workflow_class(
+        # Instantiate module
+        module_class = self.MODULE_CLASSES[module_name]
+        module = module_class(
             agents=self.agents,
             context_manager=self.context_manager,
             project_path=self.session.project_path,
         )
         
         # Prepare inputs from session context
-        inputs = self._prepare_workflow_inputs(workflow)
+        inputs = self._prepare_module_inputs(module)
         
         # Autonomous mode - let lead agent decide approach
         if autonomous:
-            lead_agent = workflow.primary_agents[0] if workflow.primary_agents else "darwin"
+            lead_agent = module.primary_agents[0] if module.primary_agents else "darwin"
             
-            # Build context from prior workflow results
+            # Build context from prior module results
             supporting_context = self._build_supporting_context()
             
-            # Use provided objective or generate from workflow description
-            exec_objective = objective or f"Complete the {workflow_name} phase: {workflow.description}"
+            # Use provided objective or generate from module description
+            exec_objective = objective or f"Complete the {module_name} phase: {module.description}"
             
-            result = await workflow.execute_autonomous(
+            result = await module.execute_autonomous(
                 inputs=inputs,
                 lead_agent=lead_agent,
                 objective=exec_objective,
@@ -1951,30 +2041,33 @@ Return ONLY valid JSON."""
             return result
         
         # Standard mode - structured execution with checkpoint support
-        checkpoint_path = self.session.project_path / "checkpoints" / f"{workflow_name}_checkpoint.json"
+        checkpoint_path = self.session.project_path / "checkpoints" / f"{module_name}_checkpoint.json"
         checkpoint = None
         if checkpoint_path.exists():
             try:
-                checkpoint = workflow.load_checkpoint(checkpoint_path)
-                self._log(f"Resuming {workflow_name} from checkpoint")
+                checkpoint = module.load_checkpoint(checkpoint_path)
+                self._log(f"Resuming {module_name} from checkpoint")
             except Exception:
                 pass  # Start fresh if checkpoint is invalid
         
-        # Execute workflow
-        result = await workflow.execute(inputs=inputs, checkpoint=checkpoint)
+        # Execute module
+        result = await module.execute(inputs=inputs, checkpoint=checkpoint)
         
         return result
     
+    # Backward compat alias
+    _execute_workflow = _execute_module
+    
     def _build_supporting_context(self) -> str:
-        """Build context string from completed workflows for autonomous execution."""
+        """Build context string from completed modules for autonomous execution."""
         context_parts = []
         
-        for wf_name, wf_result in self.session.workflow_results.items():
-            if wf_result.status == WorkflowStatus.COMPLETED:
-                context_parts.append(f"## {wf_name.replace('_', ' ').title()} Results")
-                context_parts.append(wf_result.summary or "Completed successfully")
-                if wf_result.artifacts:
-                    context_parts.append(f"Artifacts: {', '.join(wf_result.artifacts)}")
+        for mod_name, mod_result in self.session.module_results.items():
+            if mod_result.status == ModuleStatus.COMPLETED:
+                context_parts.append(f"## {mod_name.replace('_', ' ').title()} Results")
+                context_parts.append(mod_result.summary or "Completed successfully")
+                if mod_result.artifacts:
+                    context_parts.append(f"Artifacts: {', '.join(mod_result.artifacts)}")
                 context_parts.append("")
         
         # Add key session context
@@ -1990,19 +2083,19 @@ Return ONLY valid JSON."""
         
         return "\n".join(context_parts) if context_parts else ""
     
-    def _prepare_workflow_inputs(self, workflow: WorkflowModule) -> dict[str, Any]:
+    def _prepare_module_inputs(self, module: Module) -> dict[str, Any]:
         """
-        Prepare inputs for a workflow from session context.
+        Prepare inputs for a module from session context.
         
         Args:
-            workflow: Workflow module to prepare inputs for
+            module: Module to prepare inputs for
             
         Returns:
             Dictionary of inputs
         """
         inputs = {}
         
-        # Map context keys to workflow inputs
+        # Map context keys to module inputs
         context = self.session.context
         
         # Common mappings
@@ -2019,11 +2112,11 @@ Return ONLY valid JSON."""
         if "analysis_results" in context:
             inputs["analysis_results"] = context["analysis_results"]
         
-        # Pass task graph for plan dissemination (so agents see full workflow context)
+        # Pass task graph for plan dissemination (so agents see full context)
         if "task_graph" in context:
             inputs["task_graph"] = context["task_graph"]
         
-        # Pass token budget to workflows that can use it for mode selection
+        # Pass token budget to modules that can use it for mode selection
         if self._token_budget:
             inputs["token_budget"] = self._token_budget
         if "validation_report" in context:
@@ -2052,7 +2145,10 @@ Return ONLY valid JSON."""
         
         return inputs
     
-    def _show_post_consultation_summary(self, result: WorkflowResult) -> None:
+    # Backward compat alias
+    _prepare_workflow_inputs = _prepare_module_inputs
+    
+    def _show_post_consultation_summary(self, result: ModuleResult) -> None:
         """
         Show a summary after consultation is complete.
         
@@ -2144,9 +2240,9 @@ Return ONLY valid JSON."""
             complexity = complexity_map.get(complexity_str, 0.5)
             
             for task in all_tasks:
-                # Map task to workflow for estimate
-                workflow_name = self._task_to_workflow(task.id)
-                estimate_result = budget_history.estimate(workflow_name, complexity)
+                # Map task to module for estimate
+                module_name = self._task_to_module(task.id)
+                estimate_result = budget_history.estimate(module_name, complexity)
                 estimate = estimate_result.get("estimated_tokens", 50_000)
                 task_estimates.append({
                     "task_id": task.id,
@@ -2310,16 +2406,16 @@ Respond with ONLY ONE of: APPROVED, ADJUST: <changes>, or DECLINED
         
         return paths
     
-    async def _handle_workflow_failure(
+    async def _handle_module_failure(
         self,
-        workflow_name: str,
-        result: WorkflowResult,
+        module_name: str,
+        result: ModuleResult,
     ) -> bool:
         """
-        Handle a workflow failure with user-friendly prompts.
+        Handle a module failure with user-friendly prompts.
         
         Args:
-            workflow_name: Name of failed workflow
+            module_name: Name of failed module
             result: Failure result
             
         Returns:
@@ -2329,9 +2425,9 @@ Respond with ONLY ONE of: APPROVED, ADJUST: <changes>, or DECLINED
         was_spinning = Spinner.pause_for_input()
         
         print()
-        console.warning(f"The {workflow_name.replace('_', ' ')} workflow encountered an issue: {result.error}")
+        console.warning(f"The {module_name.replace('_', ' ')} module encountered an issue: {result.error}")
         print()
-        print("  Would you like to retry this workflow, skip to the next step, or stop and save progress?")
+        print("  Would you like to retry this module, skip to the next step, or stop and save progress?")
         print()
         
         try:
@@ -2349,11 +2445,14 @@ Respond with ONLY ONE of: APPROVED, ADJUST: <changes>, or DECLINED
         if any(word in response for word in retry_words):
             return True
         elif any(word in response for word in skip_words):
-            self.session.completed_workflows.append(f"{workflow_name}_skipped")
+            self.session.completed_modules.append(f"{module_name}_skipped")
             return True
         else:
             # Default to stop for safety
             return False
+    
+    # Backward compat alias
+    _handle_workflow_failure = _handle_module_failure
     
     async def _create_final_summary(self) -> str:
         """

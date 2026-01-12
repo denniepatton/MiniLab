@@ -1,8 +1,10 @@
 """
-CRITICAL REVIEW Workflow Module.
+CRITICAL_REVIEW Module.
 
 Quality assessment phase for evaluating analysis quality.
 Led by Farber (critic/quality assessor).
+
+This provides "peer review"-style scrutiny of all major deliverables.
 """
 
 from dataclasses import dataclass, field
@@ -10,7 +12,7 @@ from typing import Any, Optional
 from pathlib import Path
 import json
 
-from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
+from .base import Module, ModuleResult, ModuleCheckpoint, ModuleStatus, ModuleType
 from ..utils import console
 
 
@@ -20,13 +22,13 @@ class ReviewIssue:
     severity: str  # critical, major, minor, suggestion
     category: str  # methodology, statistics, interpretation, presentation
     description: str
-    location: str  # Where in the analysis/report
+    location: str
     recommendation: str
 
 
-class CriticalReviewModule(WorkflowModule):
+class CriticalReviewModule(Module):
     """
-    CRITICAL REVIEW: Quality assessment and iteration.
+    CRITICAL_REVIEW: Quality assessment and iteration.
     
     Purpose:
         - Critically evaluate the analysis
@@ -37,13 +39,10 @@ class CriticalReviewModule(WorkflowModule):
         - Decide if iteration is needed
     
     Primary Agent: Farber (critic)
-    Supporting:
-        - Bayes (statistical review)
-        - Greider (biological validity)
-        - Feynman (technical correctness)
+    Supporting: Bayes, Greider, Feynman
     
     Outputs:
-        - review_report: Comprehensive review
+        - eval/critical_review.md: Comprehensive review
         - issues_list: Categorized issues found
         - recommendations: Suggested improvements
         - verdict: Pass/Revise/Fail
@@ -51,6 +50,7 @@ class CriticalReviewModule(WorkflowModule):
     
     name = "critical_review"
     description = "Quality assessment and improvement recommendations"
+    module_type = ModuleType.SUBGRAPH
     
     required_inputs = ["analysis_results", "validation_report", "final_report"]
     optional_inputs = ["review_focus", "strictness_level"]
@@ -59,7 +59,6 @@ class CriticalReviewModule(WorkflowModule):
     primary_agents = ["farber"]
     supporting_agents = ["bayes", "greider", "feynman"]
     
-    # Issue severity weights for verdict calculation
     SEVERITY_WEIGHTS = {
         "critical": 10,
         "major": 5,
@@ -70,10 +69,10 @@ class CriticalReviewModule(WorkflowModule):
     async def execute(
         self,
         inputs: dict[str, Any],
-        checkpoint: Optional[WorkflowCheckpoint] = None,
-    ) -> WorkflowResult:
+        checkpoint: Optional[ModuleCheckpoint] = None,
+    ) -> ModuleResult:
         """
-        Execute critical review workflow.
+        Execute critical review module.
         
         Steps:
         1. Methodology review (Farber)
@@ -83,19 +82,17 @@ class CriticalReviewModule(WorkflowModule):
         5. Compile issues and recommendations
         6. Determine verdict
         """
-        # Validate inputs
         valid, missing = self.validate_inputs(inputs)
         if not valid:
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
+            return ModuleResult(
+                status=ModuleStatus.FAILED,
                 error=f"Missing required inputs: {missing}",
             )
         
-        # Restore or initialize state
         if checkpoint:
             self.restore(checkpoint)
         else:
-            self._status = WorkflowStatus.IN_PROGRESS
+            self._status = ModuleStatus.IN_PROGRESS
             self._current_step = 0
             self._state = {
                 "analysis_results": inputs["analysis_results"],
@@ -105,12 +102,12 @@ class CriticalReviewModule(WorkflowModule):
                 "reviews": {},
             }
         
-        strictness = inputs.get("strictness_level", "standard")  # lenient, standard, strict
+        strictness = inputs.get("strictness_level", "standard")
         
         self._log_step("Starting critical review")
         
         try:
-            # Step 1: Overall methodology review (Farber)
+            # Step 1: Methodology review (Farber)
             if self._current_step <= 0:
                 self._log_step("Step 1: Methodology review")
                 
@@ -125,21 +122,18 @@ Validation Report:
 {inputs['validation_report'][:1000]}
 
 Evaluate:
-1. Is the overall approach sound and appropriate?
+1. Is the overall approach sound?
 2. Are there logical gaps or unjustified assumptions?
-3. Are the methods well-suited to the research question?
+3. Are methods well-suited to the research question?
 4. Are there alternative approaches that should have been considered?
-5. Is the analysis reproducible from the description?
 
-For each issue found, categorize as:
+For each issue, categorize as:
 - CRITICAL: Fundamental flaw that invalidates results
 - MAJOR: Significant issue that needs addressing
 - MINOR: Small issue or improvement opportunity
 - SUGGESTION: Optional enhancement
 
-Format: [SEVERITY] Category: Description | Recommendation
-
-Be thorough but fair. This is constructive criticism.""",
+Format: [SEVERITY] Category: Description | Recommendation""",
                 )
                 
                 self._state["reviews"]["methodology"] = method_review.get("response", "")
@@ -161,18 +155,13 @@ Analysis Results:
 {json.dumps(inputs['analysis_results'], indent=2) if isinstance(inputs['analysis_results'], dict) else str(inputs['analysis_results'])[:2000]}
 
 Evaluate:
-1. Are statistical tests appropriate for the data?
-2. Are assumptions validated before using methods?
-3. Are effect sizes reported alongside p-values?
-4. Is multiple testing correction applied if needed?
+1. Are statistical tests appropriate?
+2. Are assumptions validated?
+3. Are effect sizes reported?
+4. Is multiple testing corrected?
 5. Are confidence intervals appropriate?
-6. Is uncertainty properly quantified?
-7. Are there signs of p-hacking or data dredging?
 
-Identify issues with format:
-[SEVERITY] Statistics: Description | Recommendation
-
-Be rigorous about statistical best practices.""",
+Format: [SEVERITY] Statistics: Description | Recommendation""",
                 )
                 
                 self._state["reviews"]["statistics"] = stats_review.get("response", "")
@@ -185,23 +174,18 @@ Be rigorous about statistical best practices.""",
                 
                 bio_review = await self._run_agent_task(
                     agent_name="greider",
-                    task=f"""Review the biological validity of conclusions.
+                    task=f"""Review biological validity of conclusions.
 
 Final Report:
 {inputs['final_report'][:3000]}...
 
 Evaluate:
-1. Are biological interpretations supported by the data?
+1. Are biological interpretations supported by data?
 2. Are findings consistent with known biology?
 3. Are extraordinary claims backed by extraordinary evidence?
 4. Are biological mechanisms proposed plausible?
-5. Are limitations in biological interpretation noted?
-6. Could the findings be confounded by technical artifacts?
 
-Identify issues with format:
-[SEVERITY] Biology: Description | Recommendation
-
-Balance skepticism with recognition of genuine discovery.""",
+Format: [SEVERITY] Biology: Description | Recommendation""",
                 )
                 
                 self._state["reviews"]["biology"] = bio_review.get("response", "")
@@ -227,13 +211,8 @@ Evaluate:
 2. Are there potential bugs or edge cases?
 3. Is data preprocessing appropriate?
 4. Are hyperparameters justified?
-5. Is code quality sufficient for reproducibility?
-6. Are there computational efficiency issues?
 
-Identify issues with format:
-[SEVERITY] Technical: Description | Recommendation
-
-Focus on correctness and best practices.""",
+Format: [SEVERITY] Technical: Description | Recommendation""",
                 )
                 
                 self._state["reviews"]["technical"] = tech_review.get("response", "")
@@ -258,26 +237,21 @@ All Reviews:
 
 Tasks:
 1. Consolidate duplicate issues
-2. Organize by severity (critical, major, minor, suggestion)
-3. Organize by category (methodology, statistics, biology, technical, presentation)
-4. Prioritize by impact
-5. Ensure recommendations are actionable
+2. Organize by severity
+3. Prioritize by impact
+4. Ensure recommendations are actionable
 
-Create a structured issues list in JSON format:
+Create JSON list:
 ```json
-[
-  {{"severity": "...", "category": "...", "description": "...", "recommendation": "..."}}
-]
+[{{"severity": "...", "category": "...", "description": "...", "recommendation": "..."}}]
 ```
 
-Then summarize the key concerns.""",
+Then summarize key concerns.""",
                 )
                 
                 self._state["issues_compiled"] = compile_result.get("response", "")
                 
-                # Parse issues from response
                 try:
-                    # Extract JSON from response
                     response = compile_result.get("response", "")
                     json_start = response.find("[")
                     json_end = response.rfind("]") + 1
@@ -294,14 +268,12 @@ Then summarize the key concerns.""",
             if self._current_step <= 5:
                 self._log_step("Step 6: Determining verdict")
                 
-                # Calculate issue score
                 issues = self._state.get("issues", [])
                 issue_score = sum(
                     self.SEVERITY_WEIGHTS.get(issue.get("severity", "minor"), 1)
                     for issue in issues
                 )
                 
-                # Strictness adjustments
                 strictness_thresholds = {
                     "lenient": {"pass": 15, "revise": 30},
                     "standard": {"pass": 10, "revise": 20},
@@ -316,7 +288,6 @@ Then summarize the key concerns.""",
                 else:
                     preliminary_verdict = "MAJOR_REVISION"
                 
-                # Let Farber make final determination
                 verdict_result = await self._run_agent_task(
                     agent_name="farber",
                     task=f"""Make a final verdict on this analysis.
@@ -324,105 +295,70 @@ Then summarize the key concerns.""",
 Issues Summary:
 {self._state['issues_compiled']}
 
-Calculated Score: {issue_score} (thresholds: pass<={thresholds['pass']}, revise<={thresholds['revise']})
-Preliminary Verdict: {preliminary_verdict}
+Score: {issue_score} (thresholds: pass<={thresholds['pass']}, revise<={thresholds['revise']})
+Preliminary: {preliminary_verdict}
 
-Considering:
-1. Severity of issues found
-2. Whether critical flaws exist
-3. Feasibility of addressing issues
-4. Overall quality of work
-
-Provide your final verdict:
-- PASS: Ready for use/publication with minor edits
-- REVISE: Needs specific improvements before acceptance
+Provide final verdict:
+- PASS: Ready with minor edits
+- REVISE: Needs specific improvements
 - MAJOR_REVISION: Significant work needed
-- REJECT: Fundamental flaws require starting over
+- REJECT: Fundamental flaws
 
-Start your response with "VERDICT: [verdict]"
-
-Then explain your reasoning and provide prioritized recommendations.""",
+Start with "VERDICT: [verdict]" then explain.""",
                 )
                 
                 verdict_response = verdict_result.get("response", "")
                 
-                # Parse verdict
                 if "VERDICT:" in verdict_response:
-                    verdict_line = verdict_response.split("\n")[0]
-                    verdict = verdict_line.split(":")[1].strip().upper()
-                    if verdict not in ["PASS", "REVISE", "MAJOR_REVISION", "REJECT"]:
-                        verdict = preliminary_verdict
+                    verdict_line = verdict_response.split("VERDICT:")[1].split("\n")[0].strip()
+                    for v in ["PASS", "REVISE", "MAJOR_REVISION", "REJECT"]:
+                        if v in verdict_line.upper():
+                            self._state["verdict"] = v
+                            break
+                    else:
+                        self._state["verdict"] = preliminary_verdict
                 else:
-                    verdict = preliminary_verdict
+                    self._state["verdict"] = preliminary_verdict
                 
-                self._state["verdict"] = verdict
-                self._state["verdict_explanation"] = verdict_response
+                self._state["verdict_reasoning"] = verdict_response
                 self._current_step = 6
             
-            # Write outputs to files
-            output_dir = self.project_path / "review"
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # Write outputs
+            self._write_outputs()
             
-            # Full review report
-            report_path = output_dir / "review_report.md"
-            with open(report_path, "w") as f:
-                f.write("# Critical Review Report\n\n")
-                f.write(f"## Verdict: {self._state['verdict']}\n\n")
-                f.write(self._state.get("verdict_explanation", ""))
-                f.write("\n\n---\n\n")
-                f.write("## Detailed Reviews\n\n")
-                for name, content in self._state.get("reviews", {}).items():
-                    f.write(f"### {name.title()} Review\n\n")
-                    f.write(content)
-                    f.write("\n\n")
+            self._status = ModuleStatus.COMPLETED
             
-            # Issues list
-            issues_path = output_dir / "issues_list.json"
-            with open(issues_path, "w") as f:
-                json.dump(self._state.get("issues", []), f, indent=2)
-            
-            # Recommendations summary
-            recs_path = output_dir / "recommendations.md"
-            with open(recs_path, "w") as f:
-                f.write("# Recommendations\n\n")
-                f.write(f"Verdict: {self._state['verdict']}\n\n")
-                f.write("## Priority Actions\n\n")
-                for issue in self._state.get("issues", []):
-                    if issue.get("severity") in ["critical", "major"]:
-                        f.write(f"- **[{issue.get('severity', 'unknown').upper()}]** ")
-                        f.write(f"{issue.get('description', '')}\n")
-                        f.write(f"  - *Recommendation:* {issue.get('recommendation', '')}\n\n")
-            
-            self._status = WorkflowStatus.COMPLETED
-            self._log_step(f"Critical review completed. Verdict: {self._state['verdict']}")
-            
-            return WorkflowResult(
-                status=WorkflowStatus.COMPLETED,
+            return ModuleResult(
+                status=ModuleStatus.COMPLETED,
                 outputs={
-                    "review_report": self._state.get("verdict_explanation", ""),
+                    "review_report": self._state.get("issues_compiled", ""),
                     "issues_list": self._state.get("issues", []),
-                    "recommendations": self._state.get("issues_compiled", ""),
-                    "verdict": self._state.get("verdict", "UNKNOWN"),
+                    "recommendations": self._state.get("verdict_reasoning", ""),
+                    "verdict": self._state.get("verdict", ""),
                 },
-                artifacts=[str(report_path), str(issues_path), str(recs_path)],
-                summary=f"Critical review complete. Verdict: {self._state['verdict']} with {len(self._state.get('issues', []))} issues identified.",
-                metadata={
-                    "issue_score": sum(
-                        self.SEVERITY_WEIGHTS.get(i.get("severity", "minor"), 1)
-                        for i in self._state.get("issues", [])
-                    ),
-                    "critical_count": len([i for i in self._state.get("issues", []) if i.get("severity") == "critical"]),
-                    "major_count": len([i for i in self._state.get("issues", []) if i.get("severity") == "major"]),
-                },
+                artifacts=[
+                    str(self.project_path / "eval" / "critical_review.md"),
+                ],
+                summary=f"Critical review complete. Verdict: {self._state.get('verdict', 'UNKNOWN')}",
             )
             
         except Exception as e:
-            self._status = WorkflowStatus.FAILED
-            self._log_step(f"Error: {str(e)}")
-            self.save_checkpoint()
-            
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
-                error=str(e),
-                outputs=self._state,
-            )
+            self._log_step(f"Error: {e}")
+            return ModuleResult(status=ModuleStatus.FAILED, error=str(e))
+    
+    def _write_outputs(self) -> None:
+        """Write outputs to eval directory."""
+        eval_dir = self.project_path / "eval"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        
+        with open(eval_dir / "critical_review.md", "w") as f:
+            f.write("# Critical Review\n\n")
+            f.write(f"## Verdict: {self._state.get('verdict', 'UNKNOWN')}\n\n")
+            f.write("## Review Summary\n\n")
+            f.write(self._state.get("issues_compiled", "") + "\n\n")
+            f.write("## Individual Reviews\n\n")
+            for name, content in self._state.get("reviews", {}).items():
+                f.write(f"### {name.title()} Review\n\n")
+                f.write(content + "\n\n")
+            f.write("## Verdict Reasoning\n\n")
+            f.write(self._state.get("verdict_reasoning", ""))

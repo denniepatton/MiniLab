@@ -346,7 +346,7 @@ class Agent:
         """Set colleague references."""
         self.colleagues = colleagues
     
-    def scale_iterations_to_budget(self, workflow_budget: Optional[int] = None) -> int:
+    def scale_iterations_to_budget(self, module_budget: Optional[int] = None) -> int:
         """
         Scale max_iterations based on available budget.
         
@@ -354,26 +354,26 @@ class Agent:
         continuous budget visibility during execution.
         
         Args:
-            workflow_budget: Budget for current workflow (tokens)
+            module_budget: Budget for current module (tokens)
         
         Returns:
             Suggested max_iterations (agents can finish early based on budget)
         """
-        if not workflow_budget:
+        if not module_budget:
             # Try to get from TokenAccount
             try:
                 from ..core import get_token_account
                 account = get_token_account()
                 if account.budget:
-                    workflow_budget = account.budget - account.total_used
+                    module_budget = account.budget - account.total_used
             except Exception:
                 pass
         
-        if not workflow_budget or workflow_budget <= 0:
+        if not module_budget or module_budget <= 0:
             return self._base_max_iterations
         
         # Rough estimate: each iteration costs ~3000 tokens
-        estimated_iterations = workflow_budget // 3000
+        estimated_iterations = module_budget // 3000
         
         # Use sensible bounds based on budget
         if estimated_iterations < 5:
@@ -615,7 +615,7 @@ Return ONLY the revised output, no explanation."""
         project_name: str,
         task_id: Optional[str] = None,
         resume_state: Optional[AgentState] = None,
-        workflow_budget: Optional[int] = None,
+        module_budget: Optional[int] = None,
     ) -> AgentResponse:
         """
         Execute a task using the ReAct loop.
@@ -625,7 +625,7 @@ Return ONLY the revised output, no explanation."""
             project_name: Current project
             task_id: Unique task identifier (generated if not provided)
             resume_state: State to resume from (if paused previously)
-            workflow_budget: Budget for this workflow (scales iterations)
+            module_budget: Budget for this module (scales iterations)
             
         Returns:
             AgentResponse with results
@@ -635,7 +635,7 @@ Return ONLY the revised output, no explanation."""
         self._report_activity(f"[{self.agent_id.upper()}] is beginning work: {task_preview}")
         
         # Scale iterations based on budget
-        self.scale_iterations_to_budget(workflow_budget)
+        self.scale_iterations_to_budget(module_budget)
         
         # Initialize or resume state
         if resume_state:

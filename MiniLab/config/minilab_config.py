@@ -5,10 +5,15 @@ Consolidates all configuration from multiple YAML files into a unified system.
 This is the authoritative source for:
 - Project structure and paths
 - Agent roster and specializations  
-- Workflow definitions
+- Module definitions (formerly workflows)
 - Budget allocations
 - Feature flags
 - Error handling policies
+
+Terminology (aligned with minilab_outline.md):
+- Task: A project-DAG node representing a user-meaningful milestone
+- Module: A reusable procedure that composes tools and possibly agents
+- Tool: An atomic, side-effectful capability with typed I/O
 
 Loads from minilab_config.yaml (if present) with sensible defaults.
 """
@@ -24,11 +29,32 @@ from ..utils import console
 
 @dataclass
 class ProjectStructure:
-    """Project directory layout configuration."""
+    """Project directory layout configuration per minilab_outline.md."""
     sandbox_root: str = "Sandbox"
     project_template: str = "{sandbox}/{project_name}"
-    transcripts_dir: str = "Transcripts"
+    transcripts_dir: str = "transcripts"  # Updated from "Transcripts"
     archive_dir: str = "Archive"
+    
+    # Standard subdirectories per project (from outline)
+    standard_dirs: List[str] = field(default_factory=lambda: [
+        "artifacts",
+        "planning",
+        "transcripts",
+        "logs",
+        "data/raw",
+        "data/interim",
+        "data/processed",
+        "scripts",
+        "results/figures",
+        "results/tables",
+        "reports",
+        "env",
+        "eval",
+        "memory/notes",
+        "memory/sources",
+        "memory/index",
+        "cache",
+    ])
     
     def resolve(self, project_name: Optional[str] = None) -> dict[str, Path]:
         """Resolve template variables to actual paths."""
@@ -93,14 +119,18 @@ class BudgetConfig:
 
 
 @dataclass
-class WorkflowConfig:
-    """Workflow execution configuration."""
+class ModuleConfig:
+    """Module execution configuration."""
     name: str
     description: str
     enabled: bool = True
     max_iterations: int = 3
     quality_threshold: float = 0.8
     timeout_seconds: Optional[int] = None
+
+
+# Backward compatibility alias
+WorkflowConfig = ModuleConfig
 
 
 @dataclass
@@ -145,9 +175,12 @@ class MiniLabConfig:
         self.project_structure = self._parse_project_structure(data.get("project_structure", {}))
         self.agents = self._parse_agents(data.get("agents", {}))
         self.budget = self._parse_budget(data.get("budget", {}))
-        self.workflows = self._parse_workflows(data.get("workflows", {}))
+        self.modules = self._parse_modules(data.get("modules", data.get("workflows", {})))
         self.features = self._parse_features(data.get("features", {}))
         self.error_handling = self._parse_error_handling(data.get("error_handling", {}))
+        
+        # Backward compatibility alias
+        self.workflows = self.modules
         
         # Store raw data
         self._raw_config = data
@@ -209,12 +242,12 @@ class MiniLabConfig:
             phase_caps=data.get("phase_caps", {}),
         )
     
-    def _parse_workflows(self, data: dict) -> Dict[str, WorkflowConfig]:
-        """Parse workflow configurations."""
-        workflows = {}
+    def _parse_modules(self, data: dict) -> Dict[str, ModuleConfig]:
+        """Parse module configurations."""
+        modules = {}
         
         for name, cfg in data.items():
-            workflows[name] = WorkflowConfig(
+            modules[name] = ModuleConfig(
                 name=name,
                 description=cfg.get("description", ""),
                 enabled=cfg.get("enabled", True),
@@ -223,7 +256,10 @@ class MiniLabConfig:
                 timeout_seconds=cfg.get("timeout_seconds"),
             )
         
-        return workflows
+        return modules
+    
+    # Backward compatibility alias
+    _parse_workflows = _parse_modules
     
     def _parse_features(self, data: dict) -> Dict[str, FeatureConfig]:
         """Parse feature configurations."""
@@ -275,9 +311,9 @@ class MiniLabConfig:
                 for name, agent in self.agents.items()
             },
             "budget": asdict(self.budget),
-            "workflows": {
-                name: asdict(wf)
-                for name, wf in self.workflows.items()
+            "modules": {
+                name: asdict(mod)
+                for name, mod in self.modules.items()
             },
             "features": {
                 name: asdict(feat)

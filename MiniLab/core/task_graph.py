@@ -391,6 +391,58 @@ class TaskGraph:
             return cls.from_dict(data)
         except (json.JSONDecodeError, KeyError):
             return None
+    
+    def to_dot(self, rankdir: str = "LR") -> str:
+        """
+        Render the TaskGraph to a Graphviz DOT string.
+        
+        Args:
+            rankdir: Graph direction - "LR" (left-right), "TB" (top-bottom)
+            
+        Returns:
+            DOT format string
+        """
+        return task_graph_to_dot(self, rankdir=rankdir)
+    
+    def render_png(self, dot_path: Path, png_path: Optional[Path] = None) -> Path:
+        """
+        Render the TaskGraph to a PNG image.
+        
+        Requires Graphviz to be installed.
+        
+        Args:
+            dot_path: Path to write the DOT file
+            png_path: Path for the PNG output (defaults to dot_path with .png suffix)
+            
+        Returns:
+            Path to the generated PNG file
+        """
+        # Write DOT first
+        write_task_graph_dot(self, dot_path)
+        # Render to PNG
+        return render_task_graph_png(dot_path, png_path)
+    
+    def export_visuals(self, out_dir: Path, base_name: str = "task_dag") -> dict[str, Path]:
+        """
+        Export both DOT and PNG visualizations.
+        
+        Args:
+            out_dir: Directory for output files
+            base_name: Base filename (without extension)
+            
+        Returns:
+            Dict with 'dot' and 'png' paths
+        """
+        return export_task_graph_visuals(self, out_dir=out_dir, base_name=base_name)
+    
+    def validate(self) -> None:
+        """
+        Validate the TaskGraph is a proper DAG.
+        
+        Raises:
+            TaskGraphValidationError: If validation fails
+        """
+        validate_task_graph(self)
 
 
 class TaskGraphValidationError(ValueError):

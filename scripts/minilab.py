@@ -5,11 +5,17 @@ MiniLab - Multi-Agent Scientific Lab Assistant
 Command-line interface for running MiniLab analysis sessions.
 All interactions flow through Bohr's consultation module.
 
+Terminology (aligned with minilab_outline.md):
+- Task: A project-DAG node representing a user-meaningful milestone
+- Module: A reusable procedure that composes tools and possibly agents
+- Tool: An atomic, side-effectful capability with typed I/O
+
 Usage:
     python scripts/minilab.py
     python scripts/minilab.py --resume Sandbox/my_project
     python scripts/minilab.py --list-projects
     python scripts/minilab.py --timing  # Enable performance timing
+    python scripts/minilab.py --graph   # Generate task graph visualization
 """
 
 import argparse
@@ -70,11 +76,17 @@ def parse_args() -> argparse.Namespace:
 MiniLab uses AI agents coordinated by Bohr to help with scientific analysis.
 All sessions begin with a consultation to understand your needs.
 
+Terminology:
+  - Task: A project-DAG node representing a user-meaningful milestone
+  - Module: A reusable procedure that composes tools and possibly agents
+  - Tool: An atomic, side-effectful capability with typed I/O
+
 Examples:
   python scripts/minilab.py                    # Start new session
   python scripts/minilab.py --list-projects    # See existing projects
   python scripts/minilab.py --resume Sandbox/my_project  # Continue project
   python scripts/minilab.py --timing           # Enable performance metrics
+  python scripts/minilab.py --graph Sandbox/my_project   # Show task graph
         """,
     )
     
@@ -87,6 +99,11 @@ Examples:
         "--list-projects", "-l",
         action="store_true",
         help="List existing projects in Sandbox",
+    )
+    
+    parser.add_argument(
+        "--graph", "-g",
+        help="Show task graph visualization for a project",
     )
     
     parser.add_argument(
@@ -132,9 +149,10 @@ def list_projects() -> None:
                     session = json.load(f)
                 print(f"\n  {project.name}")
                 print(f"    Started: {session.get('started_at', 'Unknown')[:19]}")
-                completed = session.get('completed_workflows', [])
+                # Support both old (completed_workflows) and new (completed_modules) keys
+                completed = session.get('completed_modules') or session.get('completed_workflows', [])
                 print(f"    Completed: {', '.join(completed) if completed else 'None'}")
-                current = session.get('current_workflow')
+                current = session.get('current_module') or session.get('current_workflow')
                 if current:
                     print(f"    Current: {current}")
             except Exception:
@@ -152,6 +170,48 @@ def list_projects() -> None:
         console.info("No projects found.")
     
     print()
+
+
+def show_task_graph(project_path: str) -> None:
+    """Show task graph visualization for a project."""
+    from MiniLab.utils import console
+    from MiniLab.core.task_graph import TaskGraph
+    
+    path = Path(project_path)
+    if not path.is_absolute():
+        path = Path(__file__).parent.parent / project_path
+    
+    task_graph_path = path / "planning" / "task_graph.json"
+    if not task_graph_path.exists():
+        task_graph_path = path / "task_graph.json"  # Legacy location
+    
+    if not task_graph_path.exists():
+        console.warning(f"No task graph found at {task_graph_path}")
+        return
+    
+    try:
+        graph = TaskGraph.load(task_graph_path)
+        dot = graph.to_dot()
+        print("\nTask Graph (DOT format):")
+        print("-" * 40)
+        print(dot)
+        print("-" * 40)
+        
+        # Try to render PNG
+        try:
+            png_path = path / "planning" / "task_graph.png"
+            png_path.parent.mkdir(parents=True, exist_ok=True)
+            graph.render_png(png_path)
+            console.info(f"PNG saved to: {png_path}")
+        except Exception as e:
+            console.debug(f"Could not render PNG: {e}")
+        
+        # Show progress
+        progress = graph.get_progress()
+        print(f"\nProgress: {progress['completed']}/{progress['total']} tasks ({progress['percentage']:.1f}%)")
+        
+    except Exception as e:
+        console.error(f"Error loading task graph: {e}")
 
 
 async def show_welcome() -> str:
@@ -231,6 +291,10 @@ async def main_async(args: argparse.Namespace) -> int:
     
     if args.list_projects:
         list_projects()
+        return 0
+    
+    if args.graph:
+        show_task_graph(args.graph)
         return 0
     
     from MiniLab.orchestrator import MiniLabOrchestrator

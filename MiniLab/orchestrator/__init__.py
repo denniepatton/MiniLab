@@ -3,6 +3,12 @@ MiniLab Orchestrators.
 
 Infrastructure for coordinating analysis sessions.
 
+Terminology (aligned with minilab_outline.md):
+- Task: A project-DAG node representing a user-meaningful milestone
+- Module: A reusable procedure that composes tools and possibly agents
+- Tool: An atomic, side-effectful capability with typed I/O
+
+Components:
 - MiniLabOrchestrator: Primary orchestrator with TaskGraph-based execution
 - MiniLabSession: Session state container
 

@@ -4,7 +4,19 @@ MiniLab Tools Module
 Typed tool system with Pydantic models for input/output validation.
 All tools integrate with PathGuard for security enforcement.
 
-Now includes VS Code-style patterns:
+Tool Namespaces (aligned with minilab_outline.md):
+- fs.*: File system operations
+- search.*: Literature and web search
+- doc.*: Document generation (DOCX/PDF)
+- fig.*: Figure generation
+- render.*: Markdown rendering
+- permission.*: User confirmation prompts
+- code.*: Code editing
+- user.*: User input
+- citation.*: Citation management
+- env.*: Environment and terminal
+
+VS Code-style patterns:
 - PreparedInvocation for two-phase tool execution
 - ResponseStream for typed progress reporting  
 - EditSession/WorkspaceEdit for atomic batched edits
@@ -22,6 +34,24 @@ from .pubmed import PubMedTool
 from .arxiv import ArxivTool
 from .citation import CitationTool
 from .tool_factory import ToolFactory
+
+# New tools for Phase 2
+from .document import DocumentTool
+from .figure import FigureTool
+from .permission import PermissionTool
+
+# Namespace registry
+from .namespaces import (
+    ToolNamespace,
+    NamespacedToolRef,
+    NamespacedToolProxy,
+    TOOL_REGISTRY,
+    get_tool_for_namespace,
+    list_namespace_tools,
+    get_all_namespaces,
+    resolve_tool_action,
+    get_tools,
+)
 
 # VS Code-style patterns
 from .prepared_invocation import (
@@ -86,6 +116,20 @@ __all__ = [
     "ArxivTool",
     "CitationTool",
     "ToolFactory",
+    # New tools
+    "DocumentTool",
+    "FigureTool",
+    "PermissionTool",
+    # Namespace system
+    "ToolNamespace",
+    "NamespacedToolRef",
+    "NamespacedToolProxy",
+    "TOOL_REGISTRY",
+    "get_tool_for_namespace",
+    "list_namespace_tools",
+    "get_all_namespaces",
+    "resolve_tool_action",
+    "get_tools",
     # PreparedInvocation (VS Code pattern)
     "PreparedInvocation",
     "ConfirmationLevel",

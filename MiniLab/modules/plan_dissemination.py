@@ -1,15 +1,11 @@
 """
-Plan Dissemination: Make the full workflow plan explicit and visible to agents.
+Plan Dissemination: Make the full plan explicit and visible to agents.
 
 This module provides utilities to:
 1. Format the task graph as a clear, human-readable plan
-2. Extract agent responsibilities from planning committee output
+2. Extract agent responsibilities from planning output
 3. Inject explicit guardrails (outputs, file locations, naming conventions)
 4. Build comprehensive context strings for agent prompts
-
-Key Insight: Agents given a full plan + explicit guardrails = fewer fragments, 
-better coherence. This prevents the root cause of Issue 2 (folder fragmentation)
-and Issue 3 (plan not disseminated).
 """
 
 from typing import Any, Optional, Dict, List
@@ -38,7 +34,7 @@ def format_task_graph_as_plan(task_graph: Any) -> str:
     if not nodes:
         return "Task graph is empty."
     
-    lines = ["WORKFLOW TASK GRAPH", "=" * 60, ""]
+    lines = ["TASK GRAPH", "=" * 60, ""]
     
     # Group tasks by status
     pending = []
@@ -72,9 +68,9 @@ def format_task_graph_as_plan(task_graph: Any) -> str:
     lines.append(f"- Failed: {len(failed)} tasks")
     lines.append("")
     
-    # Output pending tasks (most relevant to current work)
+    # Output pending tasks
     if pending:
-        lines.append("## PENDING TASKS (What needs to be done)")
+        lines.append("## PENDING TASKS")
         for task in pending:
             lines.append(f"\n### Task: {task['id']}")
             lines.append(f"Title: {task['title']}")
@@ -85,16 +81,16 @@ def format_task_graph_as_plan(task_graph: Any) -> str:
     
     # Output task dependencies
     if edges:
-        lines.append("\n## TASK DEPENDENCIES (Workflow order)")
+        lines.append("\n## TASK DEPENDENCIES")
         for edge_id, edge_data in edges.items():
             source = edge_data.get("source", "")
             target = edge_data.get("target", "")
             if source and target:
                 lines.append(f"- {source} → {target}")
     
-    # Output completed tasks (for reference)
+    # Output completed tasks
     if completed:
-        lines.append("\n## COMPLETED TASKS (For context)")
+        lines.append("\n## COMPLETED TASKS")
         for task in completed:
             lines.append(f"- {task['id']}: {task['title']}")
     
@@ -106,23 +102,16 @@ def extract_agent_responsibilities(
     task_graph: Optional[Any] = None
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Extract agent responsibilities from planning committee output.
-    
-    This parses the analysis_plan and responsibilities from Bohr's planning
-    to extract what each agent should do, what outputs they must produce,
-    and where those outputs go.
+    Extract agent responsibilities from planning output.
     
     Args:
-        planning_output: The analysis_plan text from planning_committee workflow
+        planning_output: The analysis_plan text from planning
         task_graph: Optional TaskGraph for more structured info
         
     Returns:
         Dict mapping agent_name -> {tasks, outputs, deliverables}
     """
     responsibilities: Dict[str, Dict[str, Any]] = {}
-    
-    # Parse responsibilities from planning output
-    # Look for patterns like "Agent X should...", "Agent X will produce...", etc.
     
     agents = [
         "bohr", "feynman", "hinton", "dayhoff", "bayes", "shannon",
@@ -137,25 +126,20 @@ def extract_agent_responsibilities(
             "file_locations": [],
         }
     
-    # If planning_output contains explicit assignments, extract them
-    # This is a heuristic parser - real implementation would be more sophisticated
     lines = planning_output.split('\n')
     current_agent = None
     
     for line in lines:
         line_lower = line.lower()
         
-        # Check if this line mentions an agent
         for agent in agents:
             if f"{agent}" in line_lower or f"agent {agent}" in line_lower:
                 current_agent = agent
                 break
         
-        # If we found an agent in a line with task keywords, extract the task
         if current_agent and any(kw in line_lower for kw in ["should", "will", "task", "produce", "output"]):
-            # Clean up the line and add to current agent's tasks
             clean_task = line.strip('- •*').strip()
-            if clean_task and len(clean_task) > 5:  # Skip very short lines
+            if clean_task and len(clean_task) > 5:
                 responsibilities[current_agent]["tasks"].append(clean_task)
     
     return responsibilities
@@ -171,16 +155,10 @@ def build_agent_context(
     """
     Build a comprehensive context string for an agent prompt.
     
-    This combines:
-    1. The full task graph (so agent knows what fits in the overall plan)
-    2. Agent's specific responsibilities (what THIS agent should do)
-    3. Project specification (what we're trying to accomplish)
-    4. Explicit guardrails (outputs, file paths, naming conventions)
-    
     Args:
         agent_name: Name of the agent getting the context
-        task_graph_plan: Formatted task graph (from format_task_graph_as_plan)
-        responsibilities: Agent responsibilities (from extract_agent_responsibilities)
+        task_graph_plan: Formatted task graph
+        responsibilities: Agent responsibilities
         project_spec: Project specification string
         additional_context: Optional additional context
         
@@ -189,25 +167,21 @@ def build_agent_context(
     """
     lines = []
     
-    # Header
     lines.append("=" * 70)
     lines.append(f"CONTEXT FOR AGENT: {agent_name.upper()}")
     lines.append("=" * 70)
     lines.append("")
     
-    # Project context
     lines.append("## PROJECT SPECIFICATION")
-    lines.append(project_spec[:1000])  # First 1000 chars
+    lines.append(project_spec[:1000])
     if len(project_spec) > 1000:
         lines.append(f"...[+{len(project_spec) - 1000} characters]...")
     lines.append("")
     
-    # Full workflow plan
-    lines.append("## FULL WORKFLOW PLAN (Your role in context)")
+    lines.append("## FULL TASK GRAPH")
     lines.append(task_graph_plan)
     lines.append("")
     
-    # This agent's specific responsibilities
     lines.append(f"## YOUR RESPONSIBILITIES (Agent {agent_name.upper()})")
     agent_resp = responsibilities.get(agent_name, {})
     
@@ -217,7 +191,6 @@ def build_agent_context(
         for i, task in enumerate(tasks, 1):
             lines.append(f"  {i}. {task}")
     else:
-        # Fallback if no specific tasks extracted - provide guidance
         lines.append("Based on the plan above, determine your role and specific tasks.")
     
     outputs = agent_resp.get("outputs", [])
@@ -228,31 +201,24 @@ def build_agent_context(
     
     lines.append("")
     
-    # Explicit guardrails
-    lines.append("## EXPLICIT GUARDRAILS (Must follow these)")
+    # Explicit guardrails aligned with outline directory structure
+    lines.append("## OUTPUT GUARDRAILS")
     lines.append("1. File Creation:")
-    lines.append("   - Only create files in designated directories (specified in task)")
-    lines.append("   - Follow naming conventions: descriptive, lowercase, hyphens for spaces")
-    lines.append("   - Example: analysis_results.md, feature_importance.png, model_performance.json")
+    lines.append("   - Scripts go in: scripts/")
+    lines.append("   - Results go in: results/figures/ or results/tables/")
+    lines.append("   - Reports go in: reports/")
+    lines.append("   - Artifacts go in: artifacts/")
+    lines.append("   - Data outputs go in: data/processed/")
     lines.append("")
-    lines.append("2. Output Formats:")
-    lines.append("   - Code: Well-commented, executable files in /analysis/code/")
-    lines.append("   - Data: CSV/JSON in /analysis/data/")
-    lines.append("   - Visualizations: PNG/PDF in /analysis/figures/")
-    lines.append("   - Documentation: Markdown in /analysis/ or /outputs/")
+    lines.append("2. Naming Conventions:")
+    lines.append("   - Descriptive, lowercase, underscores for spaces")
+    lines.append("   - Example: 01_preprocess_data.py, survival_curve.png")
     lines.append("")
-    lines.append("3. Integration Points:")
-    lines.append("   - Reference outputs from previous tasks when available")
-    lines.append("   - Use consistent naming and formats across agents")
-    lines.append("   - Each output should have metadata (date, agent, purpose)")
-    lines.append("")
-    lines.append("4. Critical Constraint:")
+    lines.append("3. Critical Constraint:")
     lines.append("   - ONLY create outputs you are explicitly tasked to create")
     lines.append("   - Do NOT create duplicate files or redundant outputs")
-    lines.append("   - Do NOT create files outside the project directory")
     lines.append("")
     
-    # Additional context
     if additional_context:
         lines.append("## ADDITIONAL CONTEXT")
         lines.append(additional_context)
@@ -271,11 +237,8 @@ def inject_plan_into_prompt(
     """
     Inject task graph and plan context into an agent prompt.
     
-    This is the main entry point: takes an agent's task prompt and prepends
-    comprehensive context about the overall plan and their role.
-    
     Args:
-        original_prompt: The task prompt from the workflow
+        original_prompt: The task prompt
         agent_name: Agent's name
         task_graph: TaskGraph object
         responsibilities: Agent responsibilities
@@ -292,11 +255,10 @@ def inject_plan_into_prompt(
         project_spec,
     )
     
-    # Prepend context to prompt with clear separator
     return f"""{agent_context}
 
 ================================================================================
-YOUR TASK (Complete this assignment following the guardrails above)
+YOUR TASK
 ================================================================================
 
 {original_prompt}"""
@@ -308,38 +270,34 @@ def get_output_guardrails(agent_name: str, task_type: str) -> Dict[str, str]:
     
     Args:
         agent_name: Agent name
-        task_type: Type of task (e.g., 'data_prep', 'model_dev', 'visualization')
+        task_type: Type of task
         
     Returns:
         Dict with output requirements
     """
     guardrails = {
-        # Code outputs
         "code_file": {
-            "directory": "analysis/code",
+            "directory": "scripts",
             "extension": ".py",
-            "naming": "descriptive-task-name.py",
+            "naming": "NN_descriptive_name.py",
             "requirements": "Executable, well-commented, error handling"
         },
-        # Data outputs
         "data_file": {
-            "directory": "analysis/data",
+            "directory": "data/processed",
             "extension": ".csv or .json",
-            "naming": "descriptive-data-name.csv",
+            "naming": "descriptive_name.csv",
             "requirements": "Clean, documented columns, consistent format"
         },
-        # Visualization outputs
         "figure": {
-            "directory": "analysis/figures",
+            "directory": "results/figures",
             "extension": ".png or .pdf",
-            "naming": "figure-01-descriptive-title.png",
+            "naming": "figure_NN_title.png",
             "requirements": "High quality, readable labels, legend/caption"
         },
-        # Documentation
         "document": {
-            "directory": "outputs or analysis",
-            "extension": ".md",
-            "naming": "section-name.md",
+            "directory": "reports or artifacts",
+            "extension": ".md or .docx",
+            "naming": "section_name.md",
             "requirements": "Markdown format, structured headers, citations"
         },
     }

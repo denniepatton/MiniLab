@@ -1,15 +1,19 @@
 """
 MiniLab Configuration Module.
 
+Terminology (aligned with minilab_outline.md):
+- Task: A project-DAG node representing a user-meaningful milestone
+- Module: A reusable procedure that composes tools and possibly agents
+- Tool: An atomic, side-effectful capability with typed I/O
+
 Configuration Files (in this directory):
-- agents.yaml: Agent personas, communication styles, expertise areas
-- team.yaml: Tool permissions, security capabilities, write access
+- agents_unified.yaml: Agent personas, tools, permissions, security (unified)
 - agent_flexibility.yaml: Autonomy guidance, cognitive modes, decision heuristics
-- budgets.yaml: Pricing info, budget guidance, communication norms
 
 Loaders:
 - loader.py → loads agents_unified.yaml (AgentConfig, FlexibilityConfig)
 - team_loader.py → loads unified agents config for security/capabilities
+- minilab_config.py → SSOT for project structure, budgets, modules, features
 
 Budget Tracking:
 - BudgetManager: Session-level budget tracking, delegates to TokenAccount
@@ -32,6 +36,17 @@ from .budget_history import (
     get_budget_history,
 )
 from .loader import AgentConfig, FlexibilityConfig, load_agent_config, load_flexibility_config
+from .minilab_config import (
+    MiniLabConfig,
+    ProjectStructure,
+    ModuleConfig,
+    WorkflowConfig,  # Backward compat alias
+    BudgetConfig,
+    FeatureConfig,
+    ErrorHandlingPolicy,
+    get_config,
+    reload_config,
+)
 
 __all__ = [
     # Budget management
@@ -47,4 +62,14 @@ __all__ = [
     "FlexibilityConfig",
     "load_agent_config",
     "load_flexibility_config",
+    # SSOT config
+    "MiniLabConfig",
+    "ProjectStructure",
+    "ModuleConfig",
+    "WorkflowConfig",  # Backward compat
+    "BudgetConfig",
+    "FeatureConfig",
+    "ErrorHandlingPolicy",
+    "get_config",
+    "reload_config",
 ]

@@ -3,13 +3,18 @@ Pure DAG-Driven Orchestrator for MiniLab.
 
 This is a reimplementation of MiniLabOrchestrator focused on being a pure
 execution engine that respects TaskGraph dependencies rather than
-enforcing fixed workflow sequences.
+enforcing fixed module sequences.
+
+Terminology (aligned with minilab_outline.md):
+- Task: A project-DAG node representing a user-meaningful milestone
+- Module: A reusable procedure that composes tools and possibly agents
+- Tool: An atomic, side-effectful capability with typed I/O
 
 Key design principles:
 1. TaskGraph is SOURCE OF TRUTH for execution order
-2. No hard-coded workflow sequences
+2. No hard-coded module sequences
 3. Explicit error categorization (no bare except blocks)
-4. Dynamic agent assignment per task (from TaskGraph, not workflow)
+4. Dynamic agent assignment per task (from TaskGraph, not module)
 5. Pure execution - no LLM decisions (those happen in consultation/planning)
 
 Migration Path:
@@ -25,7 +30,9 @@ import asyncio
 from enum import Enum
 
 from ..core.task_graph import TaskGraph, TaskNode, TaskStatus as GraphTaskStatus
-from ..workflows import WorkflowModule, WorkflowResult, WorkflowStatus
+from ..modules import Module, ModuleResult, ModuleStatus
+# Backward compatibility aliases
+from ..modules import WorkflowModule, WorkflowResult, WorkflowStatus
 from ..context import ContextManager
 from ..agents import AgentRegistry
 from ..storage import TranscriptLogger
@@ -46,7 +53,7 @@ class PureDAGOrchestrator:
     """
     Pure DAG-driven orchestrator that executes TaskGraphs.
     
-    Does NOT enforce workflow sequences - respects TaskGraph structure entirely.
+    Does NOT enforce module sequences - respects TaskGraph structure entirely.
     """
     
     def __init__(

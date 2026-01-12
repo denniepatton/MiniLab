@@ -1,5 +1,5 @@
 """
-EXECUTE ANALYSIS Workflow Module.
+ANALYSIS_EXECUTION Module (formerly ExecuteAnalysisModule).
 
 Implementation phase where analysis is actually performed.
 Primary loop: Dayhoff (data) -> Hinton (model) -> Bayes (validation)
@@ -10,7 +10,7 @@ from typing import Any, Optional
 from pathlib import Path
 import json
 
-from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
+from .base import Module, ModuleResult, ModuleCheckpoint, ModuleStatus, ModuleType
 from .plan_dissemination import (
     format_task_graph_as_plan,
     extract_agent_responsibilities,
@@ -25,16 +25,16 @@ class AnalysisStep:
     step_number: int
     agent: str
     task: str
-    status: str  # pending, running, completed, failed
+    status: str
     outputs: dict = field(default_factory=dict)
     code_files: list[str] = field(default_factory=list)
     data_files: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
 
-class ExecuteAnalysisModule(WorkflowModule):
+class AnalysisExecutionModule(Module):
     """
-    EXECUTE ANALYSIS: Implementation and computation phase.
+    ANALYSIS_EXECUTION: Implementation and computation phase.
     
     Purpose:
         - Execute the analysis plan step by step
@@ -45,25 +45,17 @@ class ExecuteAnalysisModule(WorkflowModule):
         - Biological interpretation hooks (Greider)
     
     Primary Loop: Dayhoff -> Hinton -> Bayes
-        - Dayhoff prepares data for each stage
-        - Hinton builds/trains models
-        - Bayes validates and provides feedback
-        - Loop until quality criteria met
-    
-    Supporting:
-        - Shannon: Feature selection/engineering
-        - Greider: Biological context for interpretation
-        - Feynman: Technical debugging/optimization
     
     Outputs:
-        - analysis_results: Key findings and metrics
-        - code_artifacts: Python scripts generated
-        - data_artifacts: Processed data files
-        - validation_report: Statistical validation
+        - scripts/: Generated code
+        - results/: Figures and tables
+        - data/processed/: Processed data
+        - artifacts/interpretation.md: Results interpretation
     """
     
-    name = "execute_analysis"
+    name = "analysis_execution"
     description = "Execute the analysis plan with iterative refinement"
+    module_type = ModuleType.SUBGRAPH
     
     required_inputs = ["analysis_plan", "responsibilities", "data_paths"]
     optional_inputs = ["max_iterations", "quality_threshold", "code_style", "task_graph", "project_spec"]
@@ -75,42 +67,27 @@ class ExecuteAnalysisModule(WorkflowModule):
     async def execute(
         self,
         inputs: dict[str, Any],
-        checkpoint: Optional[WorkflowCheckpoint] = None,
-    ) -> WorkflowResult:
-        """
-        Execute analysis workflow.
-        
-        Steps:
-        1. Parse analysis plan into executable steps
-        2. Data preparation phase (Dayhoff)
-        3. Feature engineering if needed (Shannon)
-        4. Model development loop (Hinton + Bayes)
-        5. Biological interpretation (Greider)
-        6. Final validation (Bayes)
-        """
-        # Validate inputs
+        checkpoint: Optional[ModuleCheckpoint] = None,
+    ) -> ModuleResult:
+        """Execute analysis module."""
         valid, missing = self.validate_inputs(inputs)
         if not valid:
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
+            return ModuleResult(
+                status=ModuleStatus.FAILED,
                 error=f"Missing required inputs: {missing}",
             )
         
-        # Restore or initialize state
         if checkpoint:
             self.restore(checkpoint)
         else:
-            self._status = WorkflowStatus.IN_PROGRESS
+            self._status = ModuleStatus.IN_PROGRESS
             self._current_step = 0
             
-            # Extract and format task graph for agent context
             task_graph = inputs.get("task_graph")
             task_graph_plan = format_task_graph_as_plan(task_graph) if task_graph else ""
             
-            # Extract agent responsibilities
             responsibilities = inputs.get("responsibilities", {})
             if isinstance(responsibilities, str):
-                # If it's a string from planning output, parse it
                 responsibilities = extract_agent_responsibilities(responsibilities, task_graph)
             
             self._state = {
@@ -133,13 +110,13 @@ class ExecuteAnalysisModule(WorkflowModule):
         self._log_step("Starting analysis execution")
         
         try:
-            # Step 1: Parse analysis plan into steps
+            # Step 1: Parse analysis plan
             if self._current_step <= 0:
                 self._log_step("Step 1: Parsing analysis plan")
                 
                 parse_result = await self._run_agent_task(
                     agent_name="dayhoff",
-                    task=f"""Parse this analysis plan into concrete executable steps.
+                    task=f"""Parse this analysis plan into executable steps.
 
 Analysis Plan:
 {inputs['analysis_plan']}
@@ -147,14 +124,7 @@ Analysis Plan:
 Available Data:
 {json.dumps(inputs['data_paths'], indent=2)}
 
-For each step, specify:
-1. Step number
-2. Responsible agent (dayhoff/hinton/bayes/shannon/greider)
-3. Concrete task description
-4. Input requirements
-5. Expected outputs
-
-Format as a numbered list of steps.""",
+For each step specify: step number, responsible agent, task, inputs, outputs.""",
                 )
                 
                 self._state["parsed_plan"] = parse_result.get("response", "")
@@ -176,24 +146,16 @@ Analysis Requirements:
 Tasks:
 1. Load and inspect the data files
 2. Clean and preprocess as needed
-3. Handle missing values appropriately
+3. Handle missing values
 4. Create train/test splits if needed
-5. Save processed data to Sandbox/
+5. Save processed data to data/processed/
 
-OUTPUT HYGIENE (MANDATORY):
-- Write code ONLY under the project analysis folder (Sandbox/<project>/analysis/)
-- Do NOT create throwaway scripts (no test_*.py, scratch*.py, simple_test.py)
-- Use controlled filenames only: run_analysis.py or NN_step_name.py (e.g., 01_preprocess.py)
-- Prefer editing existing files over creating new ones
+OUTPUT LOCATIONS:
+- Code: scripts/01_preprocess.py
+- Data: data/processed/
 
-Use the filesystem and code_editor tools to:
-- Read the data files
-- Write Python preprocessing scripts
-- Execute and save processed data
-
-Report what data is ready and its structure."""
+Use tools to write code and execute it."""
                 
-                # Inject plan context for this agent
                 data_task_with_context = self._inject_plan_context("dayhoff", data_task)
                 
                 data_result = await self._run_agent_task(
@@ -220,19 +182,12 @@ Analysis Goals:
 {inputs['analysis_plan'][:1000]}
 
 Tasks:
-1. Analyze information content of features
-2. Identify redundant or low-value features
+1. Analyze information content
+2. Identify redundant features
 3. Create derived features if beneficial
 4. Recommend feature selection strategy
-5. Implement feature transformations
 
-OUTPUT HYGIENE (MANDATORY):
-- Implement feature engineering in Sandbox/<project>/analysis/ using controlled filenames only
-- Do NOT create throwaway scripts (no test_*.py, scratch*.py)
-- Prefer updating a single file (e.g., 02_features.py) rather than scattering code
-
-Write code to implement feature engineering.
-Report the final feature set and rationale.""",
+OUTPUT: scripts/02_features.py""",
                 )
                 
                 self._state["feature_engineering"] = feature_result.get("response", "")
@@ -265,14 +220,9 @@ Features:
 Analysis Requirements:
 {inputs['analysis_plan'][:1000]}
 
-Tasks:
-1. {'Design model architecture' if iteration == 0 else 'Modify model based on feedback'}
-2. Implement training code
-3. Train and evaluate on validation set
-4. Report performance metrics
+OUTPUT: scripts/03_model.py
 
-Use code_editor to write model code.
-Focus on {'establishing baseline' if iteration == 0 else 'addressing validation concerns'}.""",
+Use code_editor to write and execute model code.""",
                     )
                     
                     self._state["model_development"] = model_result.get("response", "")
@@ -289,30 +239,26 @@ Data Context:
 {self._state['data_preparation'][:500]}
 
 Tasks:
-1. Assess statistical validity of approach
-2. Check for overfitting/underfitting
+1. Assess statistical validity
+2. Check for overfitting
 3. Evaluate uncertainty quantification
-4. Verify assumptions are met
+4. Verify assumptions
 
-OUTPUT HYGIENE (MANDATORY):
-- Put any validation code in Sandbox/<project>/analysis/ using controlled filenames only (e.g., 04_validate.py)
-- Do NOT create throwaway scripts (no test_*.py, scratch*.py)
-5. Suggest improvements if needed
+OUTPUT: scripts/04_validate.py
 
 Provide a validation score (0-1) and specific feedback.
-Start your response with "VALIDATION_SCORE: X.XX" on the first line.""",
+Start your response with "VALIDATION_SCORE: X.XX".""",
                     )
                     
                     validation_response = validation_result.get("response", "")
                     self._state["last_validation"] = validation_response
                     
-                    # Parse validation score
                     try:
                         score_line = validation_response.split("\n")[0]
                         if "VALIDATION_SCORE:" in score_line:
                             score = float(score_line.split(":")[1].strip())
                         else:
-                            score = 0.5  # Default if not found
+                            score = 0.5
                     except (ValueError, IndexError):
                         score = 0.5
                     
@@ -325,7 +271,7 @@ Start your response with "VALIDATION_SCORE: X.XX" on the first line.""",
                     best_score = max(best_score, score)
                     
                     if score >= quality_threshold:
-                        self._log_step(f"Quality threshold met: {score:.2f} >= {quality_threshold}")
+                        self._log_step(f"Quality threshold met: {score:.2f}")
                         break
                     
                     iteration += 1
@@ -349,142 +295,98 @@ Model Results:
 Validation:
 {self._state.get('last_validation', '')}
 
-Analysis Context:
-{inputs['analysis_plan'][:1000]}
+Project Context:
+{inputs.get('project_spec', '')[:1000]}
 
-Tasks:
-1. Interpret key findings in biological context
-2. Identify relevant pathways/mechanisms
-3. Compare with known biology
-4. Suggest biological validation experiments
-5. Note any surprising or contradictory findings
-
-Provide interpretations that would be meaningful to domain experts.""",
+Interpret the biological significance and implications.""",
                 )
                 
                 self._state["biological_interpretation"] = bio_result.get("response", "")
                 self._current_step = 5
                 self.save_checkpoint()
             
-            # Step 6: Final validation report (Bayes)
+            # Step 6: Final summary
             if self._current_step <= 5:
-                self._log_step("Step 6: Final validation report")
+                self._log_step("Step 6: Final summary")
                 
-                final_validation = await self._run_agent_task(
-                    agent_name="bayes",
-                    task=f"""Create final validation report for the analysis.
+                summary_result = await self._run_agent_task(
+                    agent_name="bohr",
+                    task=f"""Summarize the analysis execution results.
 
-All Validation Results:
-{json.dumps(self._state['validation_scores'], indent=2)}
+Data Preparation:
+{self._state['data_preparation'][:500]}
+
+Feature Engineering:
+{self._state['feature_engineering'][:500]}
 
 Model Development:
-{self._state['model_development']}
+{self._state['model_development'][:500]}
 
-Biological Context:
-{self._state['biological_interpretation']}
+Validation:
+{self._state.get('last_validation', '')[:500]}
 
-Create a comprehensive validation report including:
-1. Summary of validation iterations
-2. Final performance metrics with confidence intervals
-3. Statistical tests performed
-4. Assumptions and their validity
-5. Limitations and caveats
-6. Recommendations for interpretation
+Biological Interpretation:
+{self._state.get('biological_interpretation', '')[:500]}
 
-This report will accompany the analysis results.""",
+Create a comprehensive summary of what was accomplished.""",
                 )
                 
-                self._state["validation_report"] = final_validation.get("response", "")
+                self._state["execution_summary"] = summary_result.get("response", "")
                 self._current_step = 6
             
-            # Compile results
-            results = {
-                "model_summary": self._state.get("model_development", ""),
-                "validation_summary": self._state.get("validation_report", ""),
-                "biological_interpretation": self._state.get("biological_interpretation", ""),
-                "iterations": len(self._state.get("validation_scores", [])),
-                "final_score": self._state["validation_scores"][-1]["score"] if self._state.get("validation_scores") else 0,
-            }
+            # Write outputs
+            self._write_outputs()
             
-            # Write outputs to files
-            output_dir = self.project_path / "results"
-            output_dir.mkdir(parents=True, exist_ok=True)
+            self._status = ModuleStatus.COMPLETED
             
-            # Analysis results
-            results_path = output_dir / "analysis_results.md"
-            with open(results_path, "w") as f:
-                f.write("# Analysis Results\n\n")
-                f.write("## Model Summary\n\n")
-                f.write(self._state.get("model_development", ""))
-                f.write("\n\n## Biological Interpretation\n\n")
-                f.write(self._state.get("biological_interpretation", ""))
-            
-            # Validation report
-            validation_path = output_dir / "validation_report.md"
-            with open(validation_path, "w") as f:
-                f.write("# Validation Report\n\n")
-                f.write(self._state.get("validation_report", ""))
-            
-            # Iteration history
-            history_path = output_dir / "iteration_history.json"
-            with open(history_path, "w") as f:
-                json.dump(self._state.get("validation_scores", []), f, indent=2)
-            
-            self._status = WorkflowStatus.COMPLETED
-            self._log_step("Analysis execution completed")
-            
-            return WorkflowResult(
-                status=WorkflowStatus.COMPLETED,
+            return ModuleResult(
+                status=ModuleStatus.COMPLETED,
                 outputs={
-                    "analysis_results": results,
+                    "analysis_results": self._state.get("execution_summary", ""),
                     "code_artifacts": self._state.get("code_files", []),
                     "data_artifacts": self._state.get("data_files", []),
-                    "validation_report": self._state.get("validation_report", ""),
+                    "validation_report": self._state.get("last_validation", ""),
                 },
-                artifacts=[str(results_path), str(validation_path), str(history_path)],
-                summary=f"Analysis complete after {results['iterations']} iterations. Final score: {results['final_score']:.2f}",
+                artifacts=[
+                    str(self.project_path / "artifacts" / "interpretation.md"),
+                ],
+                summary="Analysis execution complete.",
             )
             
         except Exception as e:
-            self._status = WorkflowStatus.FAILED
-            self._log_step(f"Error: {str(e)}")
-            self.save_checkpoint()
-            
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
-                error=str(e),
-                outputs=self._state,
-            )
+            self._log_step(f"Error: {e}")
+            return ModuleResult(status=ModuleStatus.FAILED, error=str(e))
     
-    def _inject_plan_context(self, agent_name: str, original_task: str) -> str:
-        """
-        Inject task graph and plan context into an agent's task prompt.
-        
-        This ensures agents have visibility into the full workflow plan
-        and explicit guardrails about outputs, preventing fragmentation.
-        
-        Args:
-            agent_name: Name of the agent
-            original_task: The task prompt
-            
-        Returns:
-            Enhanced task prompt with context
-        """
+    def _inject_plan_context(self, agent_name: str, task: str) -> str:
+        """Inject plan context into task."""
         task_graph_plan = self._state.get("task_graph_plan", "")
         responsibilities = self._state.get("responsibilities", {})
         project_spec = self._state.get("project_spec", "")
         
-        if not task_graph_plan:
-            # If no task graph available, just return original task
-            return original_task
+        if task_graph_plan or responsibilities:
+            context = build_agent_context(
+                agent_name,
+                task_graph_plan,
+                responsibilities,
+                project_spec,
+            )
+            return f"{context}\n\n{task}"
+        return task
+    
+    def _write_outputs(self) -> None:
+        """Write outputs to appropriate directories."""
+        artifacts_dir = self.project_path / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
         
-        # Build context for this agent
-        context = build_agent_context(
-            agent_name,
-            task_graph_plan,
-            responsibilities,
-            project_spec,
-        )
-        
-        # Prepend context to task
-        return f"{context}\n\n{'='*70}\nYOUR TASK\n{'='*70}\n\n{original_task}"
+        with open(artifacts_dir / "interpretation.md", "w") as f:
+            f.write("# Analysis Results Interpretation\n\n")
+            f.write("## Execution Summary\n\n")
+            f.write(self._state.get("execution_summary", "") + "\n\n")
+            f.write("## Biological Interpretation\n\n")
+            f.write(self._state.get("biological_interpretation", "") + "\n\n")
+            f.write("## Validation Summary\n\n")
+            f.write(self._state.get("last_validation", "") + "\n")
+
+
+# Backward compatibility alias
+ExecuteAnalysisModule = AnalysisExecutionModule

@@ -4,14 +4,19 @@ MiniLab: Multi-agent scientific lab assistant.
 A sophisticated multi-agent system for conducting scientific data analysis,
 literature review, and research assistance.
 
+Terminology (aligned with minilab_outline.md):
+- Task: A project-DAG node representing a user-meaningful milestone
+- Module: A reusable procedure that composes tools and possibly agents
+- Tool: An atomic, side-effectful capability with typed I/O
+
 Architecture:
 - core/: TokenAccount and ProjectWriter for centralized management
 - security/: PathGuard for file access control
 - tools/: Typed tool system with Pydantic validation
 - context/: RAG-based context management with FAISS
 - agents/: Structured role-specific agents with ReAct loops
-- workflows/: Modular workflow components
-- orchestrator/: TaskGraph-driven orchestrator for workflow coordination
+- modules/: Modular module components (formerly workflows/)
+- orchestrator/: TaskGraph-driven orchestrator for module coordination
 
 Quick Start:
     from MiniLab import run_minilab
@@ -22,7 +27,7 @@ Quick Start:
     )
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"  # Bumped for terminology refactor
 
 # Core components
 from .core import TokenAccount, get_token_account, ProjectWriter, BudgetExceededError
@@ -45,18 +50,41 @@ from .llm_backends import AnthropicBackend, LLMBackend
 # Console utilities
 from .utils import console
 
-# Workflow modules
-from .workflows import (
+# Modules (new terminology) - with backward compat aliases
+from .modules import (
+    Module,
+    ModuleResult,
+    ModuleStatus,
+    ConsultationModule,
+    LiteratureReviewModule,
+    TeamDiscussionModule,
+    AnalysisExecutionModule,
+    BuildReportModule,
+    CriticalReviewModule,
+    # New modules
+    PlanningModule,
+    OneOnOneModule,
+    CoreInputModule,
+    EvidenceGatheringModule,
+    WriteArtifactModule,
+    GenerateCodeModule,
+    RunChecksModule,
+    SanityCheckDataModule,
+    InterpretStatsModule,
+    InterpretPlotModule,
+    CitationCheckModule,
+    FormattingCheckModule,
+    ConsultExternalExpertModule,
+    # Backward compatibility aliases
     WorkflowModule,
     WorkflowResult,
     WorkflowStatus,
-    ConsultationModule,
-    LiteratureReviewModule,
-    PlanningCommitteeModule,
-    ExecuteAnalysisModule,
-    WriteupResultsModule,
-    CriticalReviewModule,
 )
+
+# Backward compatibility aliases for old module names
+PlanningCommitteeModule = TeamDiscussionModule
+ExecuteAnalysisModule = AnalysisExecutionModule
+WriteupResultsModule = BuildReportModule
 
 # Agent creation utility
 from .agents.registry import create_agents
@@ -88,16 +116,36 @@ __all__ = [
     "LLMBackend",
     # Console
     "console",
-    # Workflows
+    # Modules (new terminology)
+    "Module",
+    "ModuleResult",
+    "ModuleStatus",
+    "ConsultationModule",
+    "LiteratureReviewModule",
+    "TeamDiscussionModule",
+    "AnalysisExecutionModule",
+    "BuildReportModule",
+    "CriticalReviewModule",
+    "PlanningModule",
+    "OneOnOneModule",
+    "CoreInputModule",
+    "EvidenceGatheringModule",
+    "WriteArtifactModule",
+    "GenerateCodeModule",
+    "RunChecksModule",
+    "SanityCheckDataModule",
+    "InterpretStatsModule",
+    "InterpretPlotModule",
+    "CitationCheckModule",
+    "FormattingCheckModule",
+    "ConsultExternalExpertModule",
+    # Backward compatibility aliases
     "WorkflowModule",
     "WorkflowResult",
     "WorkflowStatus",
-    "ConsultationModule",
-    "LiteratureReviewModule",
     "PlanningCommitteeModule",
     "ExecuteAnalysisModule",
     "WriteupResultsModule",
-    "CriticalReviewModule",
     # Utilities
     "create_agents",
 ]

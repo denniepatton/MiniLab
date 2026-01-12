@@ -29,42 +29,53 @@ All outputs MUST go in the project folder: `Sandbox/{project_name}/`
 
 ```
 {project_name}/
-├── project_specification.md    # [ALWAYS] Created during consultation - project goals and scope
-├── literature/                 # [IF literature_review] Only created when lit review runs
-│   ├── references.md          # Single bibliography
-│   └── literature_summary.md  # Narrative summary
-├── analysis/                   # [IF execute_analysis] Only for analysis workflows
-│   └── *.py                   # Analysis scripts
-├── figures/                    # [IF execute_analysis] Generated visualizations
-├── outputs/                    # [IF writeup_results] Final deliverables
-│   └── summary_report.md      # Main findings
-└── checkpoints/                # [ALWAYS] Internal workflow state
+├── artifacts/                  # Final deliverables (SSOT authority)
+│   ├── evidence.md            # Triage notes and citations from searches
+│   ├── decisions.md           # Rationale for DAG changes
+│   └── acceptance_checks.md   # Task completion criteria
+├── planning/
+│   └── task_graph.json        # DAG definition
+├── transcripts/               # Human-readable session logs
+├── logs/                      # Technical logs (JSON events)
+├── data/
+│   ├── raw/                   # Unmodified input data (read-only)
+│   ├── interim/               # Intermediate processing
+│   └── processed/             # Analysis-ready data
+├── scripts/                   # Generated code
+├── results/
+│   ├── figures/               # Generated visualizations
+│   └── tables/                # Data tables
+├── reports/                   # Final reports (DOCX/PDF)
+├── env/                       # Environment snapshots
+├── eval/                      # Evaluation metrics
+└── memory/
+    ├── notes/                 # Persistent agent notes
+    ├── sources/               # Source document references
+    └── index/                 # Vector indices
 ```
 
 ## CANONICAL DOCUMENTS (What MUST vs MAY be created)
 
 ### ALWAYS Created (by system/orchestrator):
-- `project_specification.md` - Project goals, scope, decisions from consultation
-- `session_summary.md` - End-of-session summary (orchestrator creates this)
-- `checkpoints/` - Workflow state for resumption
+- `artifacts/plan.md` - Project goals, scope, decisions from consultation
+- `planning/task_graph.json` - DAG of tasks to execute
+- `transcripts/` - Human-readable session logs
 
-### CONDITIONALLY Created (only if workflow runs):
-- `literature/references.md` - Only if literature review workflow runs
-- `literature/literature_summary.md` - Only if literature review workflow runs  
-- `analysis/*.py` - Only if execute_analysis workflow runs
-- `figures/*.png` - Only if analysis produces visualizations
-- `outputs/summary_report.md` - Only if writeup_results workflow runs
-- `data_manifest.md` - Only if input data exists in ReadData/
+### CONDITIONALLY Created (only if module executes):
+- `artifacts/evidence.md` - When EvidenceGatheringModule runs
+- `reports/*.docx|pdf` - When BuildReportModule runs
+- `scripts/*.py` - When GenerateCodeModule runs
+- `results/figures/*.png` - When analysis produces visualizations
+- `eval/*.md` - When review/check modules run
 
 ### NEVER Create These (system-managed or deprecated):
-- `executive_summary.md` - Use literature_summary.md instead
-- `brief_bibliography.md` - Use references.md instead
-- `search_summary.md` - Goes in transcript, not files
+- Files outside `Sandbox/{project}/`
+- Redundant document copies (use single living documents)
 
 ## CRITICAL RULES:
 1. Never create folders directly in Sandbox/ - always use the project subfolder
 2. **SINGLE LIVING DOCUMENTS**: Do NOT create part1.md, part2.md. UPDATE existing files.
-3. Only create documents appropriate for the current workflow
+3. Only create documents appropriate for the current module
 4. If unsure whether to create a document, don't - consolidate into canonical outputs
 
 ## Agent Signatures
@@ -260,7 +271,7 @@ Use this information to calibrate your work:
 **USE THIS DATA** to estimate tokens for planned work:
 - Compare your task to historical similar tasks
 - Adjust for complexity: simple tasks use ~70% of mean, complex tasks use ~130%
-- If no history exists for a workflow type, be conservative (assume 1.3x your estimate)
+- If no history exists for a module type, be conservative (assume 1.3x your estimate)
 - This data updates after every run - estimates improve over time
 """)
         
@@ -399,8 +410,8 @@ class PromptBuilder:
     # These extend the static YAML personas with structured prompting
     AGENT_EXTENSIONS: dict[str, dict[str, Any]] = {
         "bohr": {
-            "mission": "Orchestrate scientific research projects by coordinating agents, managing workflows, and ensuring clear communication between all parties.",
-            "scope": "Project management, workflow orchestration, user communication, high-level planning, agent delegation, and conflict resolution.",
+            "mission": "Orchestrate scientific research projects by coordinating agents, managing modules, and ensuring clear communication between all parties.",
+            "scope": "Project management, module orchestration, user communication, high-level planning, agent delegation, and conflict resolution.",
             "boundaries": [
                 "Do NOT write code - delegate to Hinton or Bayes",
                 "Do NOT perform literature searches yourself - delegate to Gould",
@@ -414,7 +425,7 @@ class PromptBuilder:
                 "Clear communication and documentation",
                 "Conflict resolution between perspectives",
                 "Budget-aware decision making",
-                "Dynamic workflow prioritization",
+                "Dynamic module prioritization",
             ],
             "tool_triggers": {
                 "filesystem": "When creating project structure, reading plans, or writing documentation",
@@ -424,7 +435,7 @@ class PromptBuilder:
             "colleague_triggers": {
                 "gould": "For literature reviews, writing manuscripts, or bibliography management",
                 "farber": "For clinical perspective or critical review of approaches",
-                "dayhoff": "For bioinformatics workflow planning",
+                "dayhoff": "For bioinformatics module planning",
                 "hinton": "For implementation feasibility or code architecture",
                 "bayes": "For statistical methodology decisions",
                 "feynman": "For unconventional problem-solving approaches",
@@ -464,7 +475,7 @@ For documentation: Use Markdown with clear headers.""",
             "termination_handling": """## GRACEFUL TERMINATION
 
 If the user indicates they want to stop, halt, end, pause, or otherwise discontinue the current 
-workflow or project - whether explicitly ("stop the project", "let's end here") or implicitly 
+module or project - whether explicitly ("stop the project", "let's end here") or implicitly 
 ("I need to go", "that's enough for now", "let's pause") - you should:
 
 1. ACKNOWLEDGE: Immediately acknowledge their request without continuing the current task
@@ -473,7 +484,7 @@ workflow or project - whether explicitly ("stop the project", "let's end here") 
 4. CONFIRM: Ask if they want to save their progress before ending
 
 DO NOT:
-- Continue running workflows after the user requests to stop
+- Continue running modules after the user requests to stop
 - Interpret "stop" as only applying to a sub-task
 - Require specific keywords - understand natural language requests to end
 
@@ -785,19 +796,19 @@ Adapt scope and depth based on project needs and budget.""",
             "max_iterations": 30,
         },
         "dayhoff": {
-            "mission": "Design bioinformatics workflows and translate high-level analysis plans into concrete, executable steps.",
-            "scope": "Workflow design, execution planning, bioinformatics methodology, data format handling, and pipeline architecture.",
+            "mission": "Design bioinformatics pipelines and translate high-level analysis plans into concrete, executable steps.",
+            "scope": "Pipeline design, execution planning, bioinformatics methodology, data format handling, and module architecture.",
             "boundaries": [
                 "Do NOT write code yourself - create plans for Hinton",
                 "Do NOT skip data validation steps",
                 "Do NOT ignore computational resource constraints",
             ],
             "expertise": [
-                "Bioinformatics workflow design",
+                "Bioinformatics pipeline design",
                 "Sequence analysis methods",
                 "Statistical genomics",
                 "Data format standards",
-                "Pipeline architecture",
+                "Module architecture",
             ],
             "tool_triggers": {
                 "filesystem": "For reading data/plans and writing execution plans",
@@ -820,7 +831,7 @@ Adapt scope and depth based on project needs and budget.""",
                 "Validation criteria",
             ],
             "optional_outputs": [
-                "Alternative workflow options",
+                "Alternative pipeline options",
                 "Computational estimates",
                 "Known issues/edge cases",
             ],
@@ -830,7 +841,7 @@ Adapt scope and depth based on project needs and budget.""",
                 "Hinton can implement without clarification",
             ],
             "failure_criteria": [
-                "Data format is incompatible with workflow",
+                "Data format is incompatible with pipeline",
                 "Required tools are unavailable",
                 "Computational requirements exceed capacity",
             ],

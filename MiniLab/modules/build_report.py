@@ -1,8 +1,10 @@
 """
-WRITE-UP RESULTS Workflow Module.
+BUILD_REPORT Module (formerly WriteupResultsModule).
 
 Documentation phase for creating comprehensive reports.
 Led by Gould (librarian/documentation expert).
+
+This module assembles narrative outputs grounded in artifacts and results.
 """
 
 from dataclasses import dataclass, field
@@ -10,13 +12,15 @@ from typing import Any, Optional
 from pathlib import Path
 import json
 
-from .base import WorkflowModule, WorkflowResult, WorkflowCheckpoint, WorkflowStatus
+from .base import Module, ModuleResult, ModuleCheckpoint, ModuleStatus, ModuleType
 from ..utils import console
 
 
-class WriteupResultsModule(WorkflowModule):
+class BuildReportModule(Module):
     """
-    WRITE-UP RESULTS: Documentation and reporting phase.
+    BUILD_REPORT: Documentation and reporting phase.
+    
+    Subgraph: outline → draft → cite → format → audit → finalize
     
     Purpose:
         - Create comprehensive analysis report
@@ -26,23 +30,20 @@ class WriteupResultsModule(WorkflowModule):
         - Prepare for peer review
     
     Primary Agent: Gould (documentation, citations)
-    Supporting: 
-        - Hinton (technical descriptions)
-        - Bayes (statistical reporting)
-        - Greider (biological narrative)
+    Supporting: Hinton, Bayes, Greider
     
     Outputs:
-        - final_report: Complete analysis report
-        - figures: Generated visualizations
-        - supplementary: Additional materials
-        - bibliography: References used
+        - reports/: Final documents (docx/pdf/md)
+        - reports/methods.docx: Methods narrative
+        - results/figures/: Generated visualizations
     """
     
-    name = "writeup_results"
+    name = "build_report"
     description = "Create comprehensive documentation and reports"
+    module_type = ModuleType.SUBGRAPH
     
     required_inputs = ["analysis_results", "validation_report", "project_spec"]
-    optional_inputs = ["figure_style", "report_format", "target_audience"]
+    optional_inputs = ["figure_style", "report_format", "target_audience", "report_profile", "report_sections"]
     expected_outputs = ["final_report", "figures", "supplementary", "bibliography"]
     
     primary_agents = ["gould"]
@@ -51,13 +52,13 @@ class WriteupResultsModule(WorkflowModule):
     async def execute(
         self,
         inputs: dict[str, Any],
-        checkpoint: Optional[WorkflowCheckpoint] = None,
-    ) -> WorkflowResult:
+        checkpoint: Optional[ModuleCheckpoint] = None,
+    ) -> ModuleResult:
         """
-        Execute write-up workflow.
+        Execute build report module.
         
         Steps:
-        1. Outline report structure
+        1. Outline report structure (Gould)
         2. Write methods section (Hinton)
         3. Write results section (Bayes)
         4. Write biological discussion (Greider)
@@ -65,19 +66,17 @@ class WriteupResultsModule(WorkflowModule):
         6. Compile full report (Gould)
         7. Add citations and references
         """
-        # Validate inputs
         valid, missing = self.validate_inputs(inputs)
         if not valid:
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
+            return ModuleResult(
+                status=ModuleStatus.FAILED,
                 error=f"Missing required inputs: {missing}",
             )
         
-        # Restore or initialize state
         if checkpoint:
             self.restore(checkpoint)
         else:
-            self._status = WorkflowStatus.IN_PROGRESS
+            self._status = ModuleStatus.IN_PROGRESS
             self._current_step = 0
             self._state = {
                 "analysis_results": inputs["analysis_results"],
@@ -91,25 +90,17 @@ class WriteupResultsModule(WorkflowModule):
         target_audience = inputs.get("target_audience", "technical")
         report_profile = inputs.get("report_profile", "full_paper")
 
-        # Allow callers to control structure explicitly.
         requested_sections = inputs.get("report_sections")
         if isinstance(requested_sections, str):
             requested_sections = [s.strip() for s in requested_sections.split(",") if s.strip()]
 
-        default_profiles: dict[str, list[str]] = {
+        default_profiles = {
             "methods_only": ["Title", "Methods"],
             "lit_review": ["Title", "Abstract", "Introduction", "Literature Review", "Conclusion", "References"],
             "code_summary": ["Title", "Summary", "Implementation Details", "How to Run", "Limitations"],
             "full_paper": [
-                "Title",
-                "Abstract",
-                "Introduction",
-                "Methods",
-                "Results",
-                "Discussion",
-                "Conclusion",
-                "Figure Legends",
-                "References",
+                "Title", "Abstract", "Introduction", "Methods", "Results",
+                "Discussion", "Conclusion", "Figure Legends", "References",
             ],
         }
 
@@ -118,7 +109,7 @@ class WriteupResultsModule(WorkflowModule):
         self._log_step("Starting results write-up")
         
         try:
-            # Step 1: Outline report structure (Gould)
+            # Step 1: Outline report structure
             if self._current_step <= 0:
                 self._log_step("Step 1: Creating report outline")
                 
@@ -134,14 +125,10 @@ Analysis Results Summary:
 
 Target Audience: {target_audience}
 Format: {report_format}
-
 Report profile: {report_profile}
-Required sections (adapt to context; omit only if clearly irrelevant):
-- """ + "\n- ".join(section_plan) + f"""
+Required sections: {', '.join(section_plan)}
 
-Create a detailed outline aligned to the required sections.
-
-For each section, note key points to cover.""",
+Create a detailed outline with key points for each section.""",
                 )
                 
                 self._state["outline"] = outline_result.get("response", "")
@@ -169,8 +156,7 @@ Write a clear Methods section covering:
 4. Training procedure and hyperparameters
 5. Evaluation metrics used
 
-Be precise and reproducible. Include enough detail that another
-researcher could replicate the analysis.""",
+Be precise and reproducible.""",
                 )
                 
                 self._state["sections"]["methods"] = methods_result.get("response", "")
@@ -196,10 +182,8 @@ Write a clear Results section covering:
 2. Statistical test results
 3. Model performance metrics
 4. Comparison to baselines if applicable
-5. Any unexpected findings
 
-Present results objectively without interpretation.
-Note statistical significance and effect sizes.""",
+Present results objectively without interpretation.""",
                 )
                 
                 self._state["sections"]["results"] = results_result.get("response", "")
@@ -220,28 +204,25 @@ Results:
 Project Context:
 {inputs['project_spec']}
 
-Write a Discussion section covering:
+Write a Discussion covering:
 1. Interpretation of key findings
 2. Biological/practical significance
 3. Comparison with prior work
-4. Limitations of the analysis
-5. Future directions and implications
-
-Connect the technical results to real-world meaning.
-Be appropriately cautious about over-interpretation.""",
+4. Limitations
+5. Future directions""",
                 )
                 
                 self._state["sections"]["discussion"] = discussion_result.get("response", "")
                 self._current_step = 4
                 self.save_checkpoint()
             
-            # Step 5: Generate figure descriptions (Hinton)
+            # Step 5: Plan figures (Hinton)
             if self._current_step <= 4:
-                self._log_step("Step 5: Planning figures and visualizations")
+                self._log_step("Step 5: Planning figures")
                 
                 figures_result = await self._run_agent_task(
                     agent_name="hinton",
-                    task=f"""Plan figures and visualizations for the report.
+                    task=f"""Plan figures for the report.
 
 Results:
 {self._state['sections']['results']}
@@ -249,18 +230,18 @@ Results:
 Methods:
 {self._state['sections']['methods']}
 
-For each figure:
+For each figure provide:
 1. Figure number and title
 2. What it shows
 3. Data to include
-4. Visualization type (line plot, heatmap, etc.)
-5. Key message
-6. **Figure legend** (publication-style: what is shown, cohort/data, axes, statistical annotations, sample sizes)
+4. Visualization type
+5. Figure legend
 
-Also write Python code to generate key figures using matplotlib/seaborn.
-Save the code using code_editor tool.
+Also write Python code to generate key figures.
+Save code to: scripts/05_figures.py
+Save figures to: results/figures/
 
-Plan 3-5 main figures and any supplementary figures needed.""",
+Plan 3-5 main figures.""",
                 )
                 
                 self._state["figure_descriptions"] = figures_result.get("response", "")
@@ -273,7 +254,7 @@ Plan 3-5 main figures and any supplementary figures needed.""",
                 
                 compile_result = await self._run_agent_task(
                     agent_name="gould",
-                    task=f"""Compile the full analysis report from all sections.
+                    task=f"""Compile the full analysis report.
 
 Outline:
 {self._state['outline']}
@@ -290,21 +271,10 @@ Discussion:
 Figure Descriptions:
 {self._state['figure_descriptions']}
 
-Project Specification:
-{inputs['project_spec']}
+Required sections: {', '.join(section_plan)}
 
-Report profile: {report_profile}
-Required sections (adapt to context; omit only if clearly irrelevant):
-- """ + "\n- ".join(section_plan) + f"""
-
-Compile a complete report aligned to the required sections.
-
-Figure Legends requirements (if figures are present):
-- Include a dedicated "Figure Legends" section.
-- Use the format: "Figure 1 | Title. Legend..." (one paragraph each).
-
-Format in {report_format}. Ensure smooth transitions between sections.
-Write this as a single cohesive document.""",
+Compile a complete report with smooth transitions.
+Format: {report_format}""",
                 )
                 
                 self._state["full_report"] = compile_result.get("response", "")
@@ -313,87 +283,70 @@ Write this as a single cohesive document.""",
             
             # Step 7: Add citations (Gould)
             if self._current_step <= 6:
-                self._log_step("Step 7: Adding citations and references")
+                self._log_step("Step 7: Adding citations")
                 
                 citations_result = await self._run_agent_task(
                     agent_name="gould",
-                    task=f"""Add citations and compile references for the report.
+                    task=f"""Add citations and compile references.
 
 Full Report:
 {self._state['full_report']}
 
 Tasks:
-1. Identify claims that need citations
-2. Search for appropriate references using pubmed/arxiv tools
+1. Identify claims needing citations
+2. Search for appropriate references
 3. Add in-text citations
 4. Compile reference list
 
-Use citation tools to look up DOIs/PMIDs.
-Format references consistently.
 Return the report with citations added.""",
                 )
                 
                 self._state["report_with_citations"] = citations_result.get("response", "")
                 self._current_step = 7
             
-            # Write outputs to files
-            output_dir = self.project_path / "report"
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # Write outputs
+            self._write_outputs(report_format)
             
-            # Main report
-            report_ext = ".md" if report_format == "markdown" else ".txt"
-            report_path = output_dir / f"analysis_report{report_ext}"
-            with open(report_path, "w") as f:
-                f.write(self._state.get("report_with_citations", self._state.get("full_report", "")))
+            self._status = ModuleStatus.COMPLETED
             
-            # Individual sections
-            sections_dir = output_dir / "sections"
-            sections_dir.mkdir(exist_ok=True)
-            for section_name, content in self._state.get("sections", {}).items():
-                section_path = sections_dir / f"{section_name}.md"
-                with open(section_path, "w") as f:
-                    f.write(f"# {section_name.title()}\n\n")
-                    f.write(content)
-            
-            # Figure descriptions
-            figures_path = output_dir / "figure_descriptions.md"
-            with open(figures_path, "w") as f:
-                f.write("# Figures\n\n")
-                f.write(self._state.get("figure_descriptions", ""))
-            
-            # Supplementary outline
-            supp_path = output_dir / "supplementary_outline.md"
-            with open(supp_path, "w") as f:
-                f.write("# Supplementary Materials\n\n")
-                f.write("## Additional Methods Details\n\n")
-                f.write("## Extended Results\n\n")
-                f.write("## Supplementary Figures\n\n")
-            
-            self._status = WorkflowStatus.COMPLETED
-            self._log_step("Write-up completed successfully")
-            
-            artifacts = [str(report_path), str(figures_path), str(supp_path)]
-            artifacts.extend([str(sections_dir / f"{s}.md") for s in self._state.get("sections", {})])
-            
-            return WorkflowResult(
-                status=WorkflowStatus.COMPLETED,
+            return ModuleResult(
+                status=ModuleStatus.COMPLETED,
                 outputs={
-                    "final_report": self._state.get("report_with_citations", ""),
+                    "final_report": self._state.get("report_with_citations", self._state.get("full_report", "")),
                     "figures": self._state.get("figure_descriptions", ""),
-                    "supplementary": "See supplementary_outline.md",
-                    "bibliography": "Citations included in report",
+                    "supplementary": "",
+                    "bibliography": "",
                 },
-                artifacts=artifacts,
-                summary="Report compilation complete with all sections and citations.",
+                artifacts=[
+                    str(self.project_path / "reports" / f"analysis_report.{report_format[:2]}"),
+                ],
+                summary="Report generation complete.",
             )
             
         except Exception as e:
-            self._status = WorkflowStatus.FAILED
-            self._log_step(f"Error: {str(e)}")
-            self.save_checkpoint()
-            
-            return WorkflowResult(
-                status=WorkflowStatus.FAILED,
-                error=str(e),
-                outputs=self._state,
-            )
+            self._log_step(f"Error: {e}")
+            return ModuleResult(status=ModuleStatus.FAILED, error=str(e))
+    
+    def _write_outputs(self, report_format: str) -> None:
+        """Write outputs to appropriate directories."""
+        reports_dir = self.project_path / "reports"
+        sections_dir = reports_dir / "sections"
+        
+        for d in [reports_dir, sections_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+        
+        # Main report
+        report_ext = ".md" if report_format == "markdown" else ".txt"
+        report_path = reports_dir / f"analysis_report{report_ext}"
+        with open(report_path, "w") as f:
+            f.write(self._state.get("report_with_citations", self._state.get("full_report", "")))
+        
+        # Individual sections
+        for section_name, content in self._state.get("sections", {}).items():
+            section_path = sections_dir / f"{section_name}.md"
+            with open(section_path, "w") as f:
+                f.write(content)
+
+
+# Backward compatibility alias
+WriteupResultsModule = BuildReportModule
